@@ -12,6 +12,8 @@ const WIDTH := 14
 const BLOCK := 1.0
 const RUN_TIME := 60.0
 const SPAWN_AHEAD := 26          # rows generated/spawned below the frontier
+const COIN_DROP_CHANCE := 0.25   # any mined tile has this chance to drop coins
+const START_ABOVE_WINDOW := 10   # rows of shaft spawned above a transport start
 
 # --- grid state ---
 var grid: Dictionary = {}         # Vector2i -> tile dict (solid, unmined)
@@ -40,6 +42,9 @@ var stats: Dictionary = {}
 var running := false
 var time_left := RUN_TIME
 var frontier := 0                 # deepest mined row (meters)
+var spawn_floor := 1              # lowest row we spawn blocks from (raised by transport)
+var _start_depth := 0             # run start depth from Elevator/Drillevator (0 = surface)
+var _shaft_col := int(WIDTH / 2)  # central column carved as the transport shaft
 var cam_focus_row := 4.0
 var cooldown_left := 0.0
 var hovered: TileBlock = null
@@ -97,9 +102,11 @@ func start_run() -> void:
 	add_child(hud)
 
 	_reset_run()
+	_apply_transport_start()      # Elevator / Drillevator: begin deep via a carved shaft
 	_ensure_world()
 	_spawn_workers()
 	_init_machines()
+	_update_camera(true)          # snap the camera to the start depth
 
 	running = true
 	set_process(true)
@@ -108,6 +115,8 @@ func start_run() -> void:
 func _reset_run() -> void:
 	time_left = RUN_TIME
 	frontier = 0
+	spawn_floor = 1
+	_start_depth = 0
 	cam_focus_row = 4.0
 	cooldown_left = 0.0
 	tiles_mined = 0
@@ -199,8 +208,27 @@ func is_mineable(pos: Vector2i) -> bool:
 # ===========================================================================
 func _ensure_world() -> void:
 	var deepest: int = maxi(frontier + SPAWN_AHEAD, 34)
-	for y in range(1, deepest + 1):
+	for y in range(spawn_floor, deepest + 1):
 		_spawn_row(y)
+
+## Descent screen: start the run down at the depth chosen there (clamped to the
+## transport cap) by carving a central shaft down to it. 0 = start at the surface.
+func _apply_transport_start() -> void:
+	var cap := GameState.transport_start_depth()
+	var chosen := GameState.selected_start_depth
+	if chosen < 0:
+		chosen = cap                       # unset -> default to the deepest allowed
+	_start_depth = clampi(chosen, 0, cap)
+	if _start_depth <= 0:
+		_start_depth = 0
+		return
+	# Only spawn (and carve) a window of shaft above the start point; everything
+	# higher stays un-spawned (off-screen) so deep starts don't build the whole map.
+	spawn_floor = maxi(1, _start_depth - START_ABOVE_WINDOW)
+	for y in range(spawn_floor, _start_depth + 1):
+		air[Vector2i(_shaft_col, y)] = true      # open the shaft (air needs no grid entry)
+	frontier = _start_depth
+	cam_focus_row = float(_start_depth)
 
 func _spawn_row(y: int) -> void:
 	if spawned_rows.has(y):
@@ -377,6 +405,7 @@ func _try_player_mine() -> void:
 		hud.flash("Blocked - no open side", Color8(255, 90, 90))
 		return
 	cooldown_left = stats["click_cooldown"]
+	hud.swing()
 	var dmg := _manual_damage(tb.grid_pos)
 	var is_crit: bool = rng.randf() < stats["crit_chance"]
 	if is_crit:
@@ -503,6 +532,7 @@ func _break_tile(pos: Vector2i, source: String, res_bonus: float) -> void:
 			hovered = null
 		tb.queue_free()
 	blocks.erase(pos)
+	_break_particles(world_pos(pos), tile.get("color", Color.WHITE))
 
 	tiles_mined += 1
 	if pos.y > frontier:
@@ -547,8 +577,47 @@ func _break_tile(pos: Vector2i, source: String, res_bonus: float) -> void:
 		GameState.add_resource("rubble", amt)
 		run_resources["rubble"] = int(run_resources.get("rubble", 0)) + amt
 
+	# Any tile (filler / resource / barrier) has a chance to drop loose coins.
+	# Amount scales with depth so it stays relevant. This is direct coin income
+	# on top of the Crusher, so mining pays out from the very first run.
+	if rng.randf() < COIN_DROP_CHANCE:
+		var bi := GameData.biome_index_for_row(pos.y)
+		var coins := rng.randi_range(1, 3) + bi
+		GameState.add_money(coins)
+		run_money += coins
+		_popup(world_pos(pos), "+%d coins" % coins, Color8(255, 210, 90))
+
 func _spark(pos: Vector2i, color: Color) -> void:
 	_popup(world_pos(pos), "", color)
+
+## A short one-shot burst of little rubble chunks when a block breaks.
+func _break_particles(at: Vector3, color: Color) -> void:
+	var p := CPUParticles3D.new()
+	p.position = at
+	var bm := BoxMesh.new()
+	bm.size = Vector3(0.14, 0.14, 0.14)
+	var mat := StandardMaterial3D.new()
+	mat.vertex_color_use_as_albedo = true      # tint each chunk by the tile colour
+	mat.roughness = 0.95
+	bm.material = mat
+	p.mesh = bm
+	p.amount = 14
+	p.lifetime = 0.55
+	p.one_shot = true
+	p.explosiveness = 1.0                       # emit the whole burst at once
+	p.spread = 180.0                            # fling outward in all directions
+	p.initial_velocity_min = 1.5
+	p.initial_velocity_max = 3.6
+	p.gravity = Vector3(0, -9.0, 0)             # then tumble down
+	p.angular_velocity_min = -540.0
+	p.angular_velocity_max = 540.0
+	p.scale_amount_min = 0.5
+	p.scale_amount_max = 1.15
+	p.color = Color(color.r, color.g, color.b, 1.0)
+	_blocks_root.add_child(p)
+	p.emitting = true
+	# Free the emitter once its particles have died.
+	get_tree().create_timer(p.lifetime + 0.3).timeout.connect(p.queue_free)
 
 # ===========================================================================
 # Workers: AI miners + drills
@@ -559,28 +628,35 @@ func _spawn_workers() -> void:
 			w["node"].queue_free()
 	workers.clear()
 
-	# Golems from the Workshop roster; each tier has its own stats + effect.
+	# Golems from the Workshop roster. Active golems are capped to the biome
+	# reached (Biome N -> N max active), spawning the strongest tiers first.
+	# (A future Stonewarden specialization would raise this cap.)
+	var max_active: int = GameData.biome_index_for_row(GameState.max_depth) + 1
+	var owned_tiers: Array = []
 	for tier in GameState.golems:
-		var count := int(GameState.golems[tier])
-		if count <= 0:
-			continue
-		var g := GameState.golem_data(int(tier))
+		for i in range(int(GameState.golems[tier])):
+			owned_tiers.append(int(tier))
+	owned_tiers.sort()
+	owned_tiers.reverse()                       # strongest tier first
+	if owned_tiers.size() > max_active:
+		owned_tiers.resize(max_active)
+	for tier in owned_tiers:
+		var g := GameState.golem_data(tier)
 		var eff: Dictionary = g.get("effect", {})
-		var dmg: float = float(g["base_damage"]) + stats["ai_damage"]
+		var dmg: float = (float(g["base_damage"]) + stats["ai_damage"]) * stats["ai_damage_mult"]
 		var interval: float = maxf(0.4, float(g["interval"]) * stats["ai_interval"])
 		var rbon: float = stats["ai_resource_bonus"] + float(eff.get("res_bonus", 0.0))
-		var col := Color.from_hsv(lerpf(0.33, 0.55, float(int(tier) - 1) / 9.0), 0.6, 0.95)
-		for i in range(count):
-			workers.append(_make_worker("golem", col, interval, dmg, rbon, {
-				"prefer_resource": bool(eff.get("prefer_resource", false)),
-				"double_hit": float(eff.get("double_hit_chance", 0.0)),
-				"splash_chance": float(eff.get("splash_chance", 0.0)),
-				"splash_damage": float(eff.get("splash_damage", 0.0)),
-			}))
+		var col := Color.from_hsv(lerpf(0.33, 0.55, float(tier - 1) / 9.0), 0.6, 0.95)
+		workers.append(_make_worker("golem", col, interval, dmg, rbon, {
+			"prefer_resource": bool(eff.get("prefer_resource", false)),
+			"double_hit": float(eff.get("double_hit_chance", 0.0)),
+			"splash_chance": float(eff.get("splash_chance", 0.0)),
+			"splash_damage": float(eff.get("splash_damage", 0.0)),
+		}))
 	# Basic Drills (flying machines).
 	var dm: Dictionary = GameData.MACHINES["buy_drill"]
 	var d_int: float = maxf(0.3, float(dm["base_interval"]) * stats["machine_speed"])
-	var d_dmg: float = float(dm["base_damage"]) + stats["machine_damage"]
+	var d_dmg: float = (float(dm["base_damage"]) + stats["machine_damage"]) * stats["machine_damage_mult"]
 	for i in range(int(stats["drill_count"])):
 		workers.append(_make_worker("drill", Color8(255, 150, 60), d_int, d_dmg, 0.0, {}))
 
@@ -595,7 +671,11 @@ func _make_worker(kind: String, color: Color, interval: float, damage: float, re
 	mat.emission = color
 	mat.emission_energy_multiplier = 0.8
 	node.material_override = mat
-	node.position = Vector3(CENTER_X + randf_range(-3, 3), 1.0, 1.0)
+	if _start_depth > 0:
+		# Transport run: drop workers into the shaft near the start depth.
+		node.position = world_pos(Vector2i(_shaft_col, maxi(1, _start_depth - 2))) + Vector3(0, 0.5, 1.0)
+	else:
+		node.position = Vector3(CENTER_X + randf_range(-3, 3), 1.0, 1.0)
 	add_child(node)
 	return {"node": node, "target": null, "cd": interval * randf_range(0.2, 1.0),
 		"kind": kind, "damage": damage, "interval": interval, "res_bonus": res_bonus,
@@ -789,13 +869,14 @@ func _process_machines(delta: float) -> void:
 		if _fuel_timer >= FUEL_BURN:
 			_fuel_timer -= FUEL_BURN
 			_burn_fuel()
+	var mmult: float = stats["machine_damage_mult"]
 	var mdmg: float = stats["machine_damage"]
 	var mspeed: float = stats["machine_speed"]
 	for mac in _machines:
 		mac["cd"] -= delta
 		if mac["cd"] <= 0.0:
 			mac["cd"] = maxf(0.3, mac["base_interval"] * mspeed * fuel_mult)
-			_fire_machine(mac, mdmg)
+			_fire_machine(mac, mdmg, mmult)
 
 func _has_fuel() -> bool:
 	return int(GameState.resources.get("coal", 0)) > 0 or int(GameState.resources.get("black_coal", 0)) > 0
@@ -806,8 +887,8 @@ func _burn_fuel() -> void:
 	elif int(GameState.resources.get("black_coal", 0)) > 0:
 		GameState.resources["black_coal"] = int(GameState.resources["black_coal"]) - 1
 
-func _fire_machine(mac: Dictionary, mdmg: float) -> void:
-	var dmg: float = mac["base_damage"] + mdmg
+func _fire_machine(mac: Dictionary, mdmg: float, mmult: float) -> void:
+	var dmg: float = (mac["base_damage"] + mdmg) * mmult
 	match mac["kind"]:
 		"hammer":
 			var t = _random_exposed()
@@ -815,7 +896,7 @@ func _fire_machine(mac: Dictionary, mdmg: float) -> void:
 				return
 			mac["node"].global_position = world_pos(t) + Vector3(0, 0, WORKER_Z)
 			_damage_tile(t, dmg, "machine", 0.0)
-			_overflow_splash(t, mac["splash"] + mdmg, "machine", 0.0)   # area slam
+			_overflow_splash(t, (mac["splash"] + mdmg) * mmult, "machine", 0.0)   # area slam
 			_popup(world_pos(t), "SLAM", Color8(255, 220, 90))
 		"linedrill":
 			var seed_tile = _random_exposed()

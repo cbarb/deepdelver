@@ -20,7 +20,7 @@ func _ready() -> void:
 	layer = 10
 	_build()
 	_apply_placements()
-	_cursor_ring = CursorRing.new()
+	_cursor_ring = CursorRing.new()  # software cursor: pickaxe sprite + cooldown bar
 	add_child(_cursor_ring)
 	_cursor_ring.set_pickaxe(GameData.get_pickaxe_texture(GameState.pickaxe_tier))
 	Input.mouse_mode = Input.MOUSE_MODE_HIDDEN     # hide OS cursor; we draw the pickaxe
@@ -134,6 +134,11 @@ func _process(delta: float) -> void:
 		_flash_lbl.modulate.a = clampf(_flash_time / 0.9, 0.0, 1.0)
 		if _flash_time <= 0.0:
 			_flash_lbl.text = ""
+
+## Trigger the pickaxe swing animation on the software cursor.
+func swing() -> void:
+	if _cursor_ring:
+		_cursor_ring.swing()
 
 func flash(text: String, color: Color) -> void:
 	_flash_lbl.text = text

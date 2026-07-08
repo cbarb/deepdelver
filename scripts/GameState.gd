@@ -14,8 +14,11 @@ var upgrade_levels: Dictionary = {}      # upgrade_id -> level
 var skill_levels: Dictionary = {}        # skill_id -> level
 var max_depth: int = 0                   # best depth ever (meters)
 var pickaxe_tier: int = 0                # owned pickaxe tier (index into GameData.PICKAXES)
+var pickaxe_upgrade_levels: Dictionary = {}  # tier(int) -> upgrade level 1..5 (1 = base)
 var golems: Dictionary = {}              # tier(int) -> count owned
 var last_summary: Dictionary = {}        # summary of the most recent run
+var use_transport: bool = true           # (legacy) transport ride flag; superseded by selected_start_depth
+var selected_start_depth: int = -1       # depth (m) chosen on the descent screen; -1 = unset -> default deepest
 
 # Base (unmodified) player stats.
 var _base_stats := {
@@ -29,10 +32,12 @@ var _base_stats := {
 	"deep_bonus": 0.0,           # extra damage per 100m
 	"manual_resource_bonus": 0.0,
 	"ai_interval": 1.0,          # MULTIPLIER on each golem's tier interval (lower = faster)
-	"ai_damage": 0.0,            # flat ADD to each golem's tier damage
+	"ai_damage": 0.0,            # flat ADD to each golem's tier damage (upgrades)
+	"ai_damage_mult": 1.0,       # MULTIPLIER on total golem damage (skills; PDF-capped)
 	"ai_resource_bonus": 0.0,
 	"machine_speed": 1.0,        # MULTIPLIER on machine intervals (lower = faster)
-	"machine_damage": 0.0,       # flat ADD to every machine's damage
+	"machine_damage": 0.0,       # flat ADD to every machine's damage (upgrades)
+	"machine_damage_mult": 1.0,  # MULTIPLIER on total machine damage (skills; PDF-capped)
 	# pickaxe effect fields (set from the equipped pickaxe)
 	"filler_exp_bonus": 0.0,
 	"shatter_chance": 0.0,
@@ -56,7 +61,7 @@ func get_effective_stats() -> Dictionary:
 	var s := _base_stats.duplicate(true)
 	# Equipped pickaxe sets base damage + grants its effect, before upgrades/skills.
 	var pk := current_pickaxe()
-	s["click_damage"] = float(pk.get("base_damage", 1))
+	s["click_damage"] = float(pk.get("base_damage", 1)) * pickaxe_upgrade_mult()
 	var eff: Dictionary = pk.get("effect", {})
 	s["click_cooldown"] *= float(eff.get("cooldown_mult", 1.0))
 	s["deep_bonus"] += float(eff.get("depth_bonus", 0.0))
@@ -81,7 +86,7 @@ func get_effective_stats() -> Dictionary:
 	s["scanner_level"] = int(upgrade_levels.get("buy_scanner", 0))
 	s["fuel_level"] = int(upgrade_levels.get("buy_fuel", 0))
 	# Safety clamps.
-	s["click_cooldown"] = maxf(0.12, s["click_cooldown"])
+	s["click_cooldown"] = maxf(0.30, s["click_cooldown"])   # hard cap (manual spec would lower to ~0.22-0.25)
 	s["ai_interval"] = maxf(0.15, s["ai_interval"])       # golem interval multiplier floor
 	s["machine_speed"] = maxf(0.2, s["machine_speed"])    # machine interval multiplier floor
 	s["crit_chance"] = clampf(s["crit_chance"], 0.0, 1.0)
@@ -231,6 +236,62 @@ func buy_next_pickaxe() -> bool:
 	pickaxe_tier += 1
 	return true
 
+# --- Per-pickaxe upgrade levels (1..5, ×1.0/1.2/1.45/1.75/2.10 damage) ---
+# Coins-only, scaled from the pickaxe's own craft coin cost.
+const PICKAXE_UPGRADE_COST_FACTOR := [0.25, 0.5, 0.9, 1.5]   # for level 1->2, 2->3, 3->4, 4->5
+
+func pickaxe_upgrade_level(tier: int) -> int:
+	return clampi(int(pickaxe_upgrade_levels.get(tier, 1)), 1, GameData.PICKAXE_UPGRADE_MULT.size())
+
+## Damage multiplier of the currently-equipped pickaxe from its upgrade level.
+func pickaxe_upgrade_mult() -> float:
+	var lvl := pickaxe_upgrade_level(pickaxe_tier)
+	return float(GameData.PICKAXE_UPGRADE_MULT[lvl - 1])
+
+func is_pickaxe_upgrade_maxed(tier: int) -> bool:
+	return pickaxe_upgrade_level(tier) >= GameData.PICKAXE_UPGRADE_MULT.size()
+
+## Coin cost to raise the given pickaxe from its current level to the next.
+func pickaxe_upgrade_cost(tier: int) -> int:
+	var lvl := pickaxe_upgrade_level(tier)
+	if lvl >= GameData.PICKAXE_UPGRADE_MULT.size():
+		return 0
+	var craft_coins: int = int(GameData.PICKAXES[tier].get("cost", {}).get("coins", 0))
+	var base := maxi(25, craft_coins)   # Wooden starter has no craft coins; give it a floor
+	return int(round(base * float(PICKAXE_UPGRADE_COST_FACTOR[lvl - 1])))
+
+# --- Transport (Elevator / Drillevator): start a run down at your best depth ---
+const ELEVATOR_CAP := 150   # Elevator start-depth cap (bottom of biome 3)
+
+func owns_elevator() -> bool:
+	return upgrade_level("buy_elevator") > 0
+
+func owns_drillevator() -> bool:
+	return upgrade_level("buy_drillevator") > 0
+
+func owns_transport() -> bool:
+	return owns_elevator() or owns_drillevator()
+
+## Depth a run would start at with the best owned transport (0 = none/surface).
+## Ignores the use_transport toggle -- that gate is applied by the caller.
+func transport_start_depth() -> int:
+	if owns_drillevator():
+		return max_depth
+	if owns_elevator():
+		return mini(max_depth, ELEVATOR_CAP)
+	return 0
+
+## Upgrade the currently-equipped pickaxe one level. Returns true on success.
+func buy_pickaxe_upgrade() -> bool:
+	if is_pickaxe_upgrade_maxed(pickaxe_tier):
+		return false
+	var cost := pickaxe_upgrade_cost(pickaxe_tier)
+	if money < cost:
+		return false
+	money -= cost
+	pickaxe_upgrade_levels[pickaxe_tier] = pickaxe_upgrade_level(pickaxe_tier) + 1
+	return true
+
 # ---------------------------------------------------------------------------
 # Golems (Workshop roster: own many of each tier)
 # ---------------------------------------------------------------------------
@@ -296,6 +357,42 @@ func buy_skill(id: String) -> bool:
 	skill_levels[id] = skill_level(id) + 1
 	return true
 
+# --- Refund: pay coins to reclaim a skill point (one level at a time) ---
+const SKILL_REFUND_COIN_PER_POINT := 50   # coins charged per skill point reclaimed
+
+func skill_refund_cost(id: String) -> int:
+	return SKILL_REFUND_COIN_PER_POINT * skill_cost(id)
+
+## True if any *owned* node lists `id` as its prerequisite — such a node would be
+## orphaned if `id` dropped to level 0, so its last level can't be refunded first.
+func skill_has_owned_dependents(id: String) -> bool:
+	for other in skill_levels:
+		if int(skill_levels[other]) > 0 and GameData.SKILLS.has(other):
+			if GameData.SKILLS[other].get("requires", "") == id:
+				return true
+	return false
+
+func can_refund_skill(id: String) -> bool:
+	if not GameData.SKILLS.has(id) or skill_level(id) <= 0:
+		return false
+	if money < skill_refund_cost(id):
+		return false
+	# Refunding the final level would unlock-break any owned dependents.
+	if skill_level(id) == 1 and skill_has_owned_dependents(id):
+		return false
+	return true
+
+func refund_skill(id: String) -> bool:
+	if not can_refund_skill(id):
+		return false
+	money -= skill_refund_cost(id)
+	var lvl := skill_level(id) - 1
+	if lvl <= 0:
+		skill_levels.erase(id)
+	else:
+		skill_levels[id] = lvl
+	return true
+
 # ---------------------------------------------------------------------------
 # Save / Load
 # ---------------------------------------------------------------------------
@@ -303,7 +400,7 @@ func save_game() -> void:
 	var data := {
 		"resources": resources, "money": money, "exp": exp, "lifetime_exp": lifetime_exp,
 		"upgrade_levels": upgrade_levels, "skill_levels": skill_levels, "max_depth": max_depth,
-		"pickaxe_tier": pickaxe_tier, "golems": golems,
+		"pickaxe_tier": pickaxe_tier, "pickaxe_upgrade_levels": pickaxe_upgrade_levels, "golems": golems,
 	}
 	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
 	if f:
@@ -328,6 +425,7 @@ func load_game() -> void:
 	skill_levels = _to_int_dict(parsed.get("skill_levels", {}))
 	max_depth = int(parsed.get("max_depth", 0))
 	pickaxe_tier = int(parsed.get("pickaxe_tier", 0))
+	pickaxe_upgrade_levels = _to_int_keyed_dict(parsed.get("pickaxe_upgrade_levels", {}))
 	golems = _to_int_keyed_dict(parsed.get("golems", {}))
 
 func _to_int_dict(d) -> Dictionary:
@@ -354,6 +452,7 @@ func reset_progress() -> void:
 	skill_levels.clear()
 	max_depth = 0
 	pickaxe_tier = 0
+	pickaxe_upgrade_levels.clear()
 	golems.clear()
 	last_summary.clear()
 	save_game()

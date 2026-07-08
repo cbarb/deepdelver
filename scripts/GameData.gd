@@ -47,19 +47,64 @@ var _thresholds := [25, 75, 150, 250, 400, 600, 850, 1150, 1500]
 
 var BIOMES := []
 
-func _biome(id, name, depth_lo, depth_hi, fillers, resources, base_health, exp_f, exp_r, density, cluster) -> Dictionary:
+# Per-biome tile HP by category (index 0..9). From the balance-pass PDF.
+# Categories: filler, common (resource), rare (resource), barrier.
+var TILE_HP := [
+	{"filler": 3,    "common": 5,    "rare": 8,    "barrier": 10},
+	{"filler": 10,   "common": 15,   "rare": 22,   "barrier": 30},
+	{"filler": 24,   "common": 36,   "rare": 52,   "barrier": 70},
+	{"filler": 50,   "common": 75,   "rare": 110,  "barrier": 150},
+	{"filler": 95,   "common": 140,  "rare": 210,  "barrier": 290},
+	{"filler": 170,  "common": 250,  "rare": 380,  "barrier": 520},
+	{"filler": 300,  "common": 450,  "rare": 680,  "barrier": 900},
+	{"filler": 520,  "common": 780,  "rare": 1150, "barrier": 1550},
+	{"filler": 900,  "common": 1350, "rare": 2000, "barrier": 2700},
+	{"filler": 1550, "common": 2300, "rare": 3500, "barrier": 4700},
+]
+
+# Per-biome tile-category distribution (fractions summing to 1). From the PDF.
+var TILE_DISTRIBUTION := [
+	{"filler": 0.72, "common": 0.22, "rare": 0.04, "barrier": 0.02},
+	{"filler": 0.74, "common": 0.20, "rare": 0.04, "barrier": 0.02},
+	{"filler": 0.76, "common": 0.18, "rare": 0.04, "barrier": 0.02},
+	{"filler": 0.78, "common": 0.16, "rare": 0.04, "barrier": 0.02},
+	{"filler": 0.80, "common": 0.15, "rare": 0.03, "barrier": 0.02},
+	{"filler": 0.81, "common": 0.14, "rare": 0.03, "barrier": 0.02},
+	{"filler": 0.82, "common": 0.13, "rare": 0.03, "barrier": 0.02},
+	{"filler": 0.83, "common": 0.12, "rare": 0.03, "barrier": 0.02},
+	{"filler": 0.84, "common": 0.11, "rare": 0.03, "barrier": 0.02},
+	{"filler": 0.85, "common": 0.10, "rare": 0.03, "barrier": 0.02},
+]
+
+# Cluster sizes for the generator (PDF cluster rules).
+const COMMON_VEIN := [3, 8]      # common resources appear in veins of 3-8
+const RARE_CLUSTER := [1, 4]     # rare resources appear in clusters of 1-4
+const BARRIER_CLUSTER := [1, 2]  # barriers are single blocks or tiny pockets
+
+func tile_hp(biome_index: int, category: String) -> int:
+	var bi := clampi(biome_index, 0, TILE_HP.size() - 1)
+	return int(TILE_HP[bi].get(category, TILE_HP[bi]["filler"]))
+
+func tile_distribution(biome_index: int) -> Dictionary:
+	return TILE_DISTRIBUTION[clampi(biome_index, 0, TILE_DISTRIBUTION.size() - 1)]
+
+func _biome(id, name, depth_lo, depth_hi, fillers, resources, barrier, exp_f, exp_r) -> Dictionary:
 	return {
 		"id": id, "name": name, "depth_lo": depth_lo, "depth_hi": depth_hi,
-		"fillers": fillers, "resources": resources,
-		"base_health": base_health, "exp_filler": exp_f, "exp_resource": exp_r,
-		"vein_chance": density, "cluster_size": cluster,
+		"fillers": fillers, "resources": resources, "barrier": barrier,
+		"exp_filler": exp_f, "exp_resource": exp_r,
 	}
 
 func _f(id, name, col, w) -> Dictionary:
 	return {"id": id, "name": name, "color": col, "weight": w}
 
-func _r(id, w, amt_lo, amt_hi, glow := false) -> Dictionary:
-	return {"id": id, "weight": w, "amount": [amt_lo, amt_hi], "glow": glow}
+# A resource def. `rarity` is "common" (default) or "rare" -> picks its HP tier.
+func _r(id, w, amt_lo, amt_hi, glow := false, rarity := "common") -> Dictionary:
+	return {"id": id, "weight": w, "amount": [amt_lo, amt_hi], "glow": glow, "rarity": rarity}
+
+# A barrier def: tough, no-drop block. No texture id -> renders as a flat dark cube.
+func _bar(id, name, col) -> Dictionary:
+	return {"id": id, "name": name, "color": col}
 
 func _ready() -> void:
 	BIOMES = [
@@ -68,80 +113,80 @@ func _ready() -> void:
 			_f("packed_dirt", "Packed Dirt", Color8(112, 78, 48), 30),
 			_f("loose_stone", "Loose Stone", Color8(142, 136, 126), 20),
 		], [
-			_r("rock", 12, 1, 3), _r("wood", 7, 1, 2),
-		], 3, 1, 4, 0.020, [2, 4]),
+			_r("rock", 12, 1, 3), _r("wood", 7, 1, 2, false, "rare"),
+		], _bar("barrier_1", "Bedrock", Color8(60, 44, 30)), 1, 4),
 
 		_biome(1, "Stone Veins", 25, 75, [
 			_f("stone", "Stone", Color8(128, 128, 132), 46),
 			_f("gravel", "Gravel", Color8(122, 118, 112), 30),
 			_f("hard_dirt", "Hard Dirt", Color8(100, 74, 52), 24),
 		], [
-			_r("copper", 9, 1, 3), _r("coal", 9, 1, 3), _r("rock", 6, 1, 2),
-		], 4, 2, 7, 0.022, [2, 5]),
+			_r("copper", 9, 1, 3, false, "rare"), _r("coal", 9, 1, 3), _r("rock", 6, 1, 2),
+		], _bar("barrier_2", "Bedrock", Color8(50, 50, 54)), 2, 7),
 
 		_biome(2, "Moss Caverns", 75, 150, [
 			_f("damp_stone", "Damp Stone", Color8(96, 106, 106), 44),
 			_f("mossy_dirt", "Mossy Dirt", Color8(92, 86, 58), 32),
 			_f("clay", "Clay", Color8(152, 112, 88), 24),
 		], [
-			_r("iron", 8, 1, 3), _r("resin", 7, 1, 2, true), _r("cave_moss", 8, 1, 3, true),
-		], 5, 3, 11, 0.022, [3, 5]),
+			_r("iron", 8, 1, 3, false, "rare"), _r("resin", 7, 1, 2, true), _r("cave_moss", 8, 1, 3, true),
+		], _bar("barrier_3", "Bedrock", Color8(40, 52, 48)), 3, 11),
 
 		_biome(3, "Crystal Hollow", 150, 250, [
 			_f("pale_stone", "Pale Stone", Color8(178, 180, 188), 46),
 			_f("crystal_dust", "Crystal Dust", Color8(172, 178, 198), 30),
 			_f("brittle_rock", "Brittle Rock", Color8(150, 150, 158), 24),
 		], [
-			_r("blue_crystal", 6, 1, 2, true), _r("quartz", 8, 1, 3, true), _r("silver", 6, 1, 2),
-		], 6, 4, 16, 0.020, [3, 6]),
+			_r("blue_crystal", 6, 1, 2, true), _r("quartz", 8, 1, 3, true), _r("silver", 6, 1, 2, false, "rare"),
+		], _bar("barrier_4", "Bedrock", Color8(70, 72, 84)), 4, 16),
 
 		_biome(4, "Emberstone Layer", 250, 400, [
 			_f("dark_stone", "Dark Stone", Color8(66, 62, 64), 46),
 			_f("ash", "Ash", Color8(92, 86, 84), 30),
 			_f("burnt_rock", "Burnt Rock", Color8(58, 50, 48), 24),
 		], [
-			_r("ember", 7, 1, 3, true), _r("sulfur", 8, 1, 3, true), _r("obsidian", 5, 1, 2),
-		], 8, 6, 24, 0.020, [3, 6]),
+			_r("ember", 7, 1, 3, true), _r("sulfur", 8, 1, 3, true), _r("obsidian", 5, 1, 2, false, "rare"),
+		], _bar("barrier_5", "Bedrock", Color8(30, 26, 26)), 6, 24),
 
 		_biome(5, "Ancient Ruins", 400, 600, [
 			_f("cracked_brick", "Cracked Brick", Color8(168, 140, 102), 42),
 			_f("ancient_stone", "Ancient Stone", Color8(150, 138, 112), 34),
 			_f("sand_rock", "Sand-packed Rock", Color8(178, 158, 118), 24),
 		], [
-			_r("relic", 4, 1, 2), _r("gold", 8, 1, 3, true), _r("rune", 4, 1, 2, true),
-		], 10, 8, 34, 0.018, [3, 6]),
+			_r("relic", 4, 1, 2), _r("gold", 8, 1, 3, true), _r("rune", 4, 1, 2, true, "rare"),
+		], _bar("barrier_6", "Bedrock", Color8(70, 58, 40)), 8, 34),
 
 		_biome(6, "Fungal Depths", 600, 850, [
 			_f("fungal_soil", "Fungal Soil", Color8(80, 66, 76), 44),
 			_f("soft_stone", "Soft Stone", Color8(112, 106, 112), 32),
 			_f("spore", "Spore Block", Color8(140, 120, 160), 24),
 		], [
-			_r("mycelium", 8, 1, 3, true), _r("glowcap", 6, 1, 2, true), _r("deep_iron", 7, 1, 3),
-		], 13, 11, 48, 0.020, [4, 7]),
+			_r("mycelium", 8, 1, 3, true), _r("glowcap", 6, 1, 2, true), _r("deep_iron", 7, 1, 3, false, "rare"),
+		], _bar("barrier_7", "Bedrock", Color8(40, 34, 44)), 11, 48),
 
 		_biome(7, "Pressure Core", 850, 1150, [
 			_f("compressed_stone", "Compressed Stone", Color8(74, 76, 86), 46),
 			_f("dense_basalt", "Dense Basalt", Color8(52, 54, 64), 30),
 			_f("pressure_rock", "Pressure Rock", Color8(64, 64, 72), 24),
 		], [
-			_r("titanium", 6, 1, 2), _r("pressure_gem", 4, 1, 2, true), _r("black_coal", 9, 1, 3),
-		], 17, 15, 66, 0.018, [4, 7]),
+			_r("titanium", 6, 1, 2), _r("pressure_gem", 4, 1, 2, true, "rare"), _r("black_coal", 9, 1, 3),
+		], _bar("barrier_8", "Bedrock", Color8(30, 32, 40)), 15, 66),
 
 		_biome(8, "Astral Geode", 1150, 1500, [
 			_f("void_stone", "Void Stone", Color8(58, 52, 74), 46),
 			_f("geode_shell", "Geode Shell", Color8(88, 78, 94), 32),
 			_f("dark_crystal", "Dark Crystal", Color8(120, 74, 178), 22),
 		], [
-			_r("astral", 5, 1, 2, true), _r("prismatic", 3, 1, 2, true), _r("moon", 6, 1, 2, true),
-		], 22, 20, 90, 0.016, [3, 6]),
+			_r("astral", 5, 1, 2, true), _r("prismatic", 3, 1, 2, true, "rare"), _r("moon", 6, 1, 2, true),
+		], _bar("barrier_9", "Bedrock", Color8(34, 28, 50)), 20, 90),
 
 		_biome(9, "The Living Core", 1500, 99999, [
 			_f("living_stone", "Living Stone", Color8(98, 60, 58), 44),
 			_f("core_matter", "Core Matter", Color8(80, 50, 60), 34),
 			_f("organic_rock", "Dense Organic Rock", Color8(76, 58, 52), 22),
 		], [
-			_r("heartstone", 4, 1, 2, true), _r("core_fragment", 3, 1, 2, true), _r("ancient_energy", 3, 1, 1, true),
-		], 28, 28, 130, 0.015, [3, 6]),
+			_r("heartstone", 4, 1, 2, true), _r("core_fragment", 3, 1, 2, true), _r("ancient_energy", 3, 1, 1, true, "rare"),
+		], _bar("barrier_10", "Bedrock", Color8(44, 26, 26)), 28, 130),
 	]
 	_build_skill_tree()
 
@@ -182,8 +227,8 @@ var UPGRADES := {
 		"stat": "click_damage", "mode": "add", "per_level": 1,
 	},
 	"quick_swing": {
-		"name": "Quick Swing", "category": "Pickaxe", "desc": "-8% click cooldown / level",
-		"max_level": 8, "cost": {"wood": 30, "rock": 20, "coins": 40}, "cost_growth": 1.8,
+		"name": "Quick Swing", "category": "Pickaxe", "desc": "-8% click cooldown / level (floors at 0.30s)",
+		"max_level": 10, "cost": {"wood": 30, "rock": 20, "coins": 40}, "cost_growth": 1.8,
 		"stat": "click_cooldown", "mode": "cooldown", "per_level": 0.08,
 	},
 	"lucky_strike": {
@@ -270,11 +315,26 @@ var UPGRADES := {
 		"max_level": 20, "cost": {"iron": 30, "coal": 20, "coins": 60}, "cost_growth": 1.7,
 		"stat": "machine_damage", "mode": "add", "per_level": 1,
 	},
+	# --- Transport ---  (one-time buys; start a run already down at your best depth)
+	"buy_elevator": {
+		"name": "Elevator", "category": "Transport",
+		"desc": "Start each run at your deepest point (down to biome 3 at most).",
+		"max_level": 1, "cost": {"wood": 60, "rock": 80, "coins": 800}, "cost_growth": 1.0,
+		"stat": "", "mode": "count",
+	},
+	"buy_drillevator": {
+		"name": "Drillevator", "category": "Transport",
+		"desc": "Drills a central shaft to your deepest point at run start (no depth limit).",
+		"max_level": 1, "cost": {"iron": 200, "cave_moss": 120, "blue_crystal": 100, "silver": 60, "coins": 30000}, "cost_growth": 1.0,
+		"stat": "", "mode": "count",
+	},
 }
 
 # Runtime parameters for the active in-run machines (keyed by their buy upgrade).
 var MACHINES := {
-	"buy_drill":     {"base_damage": 2, "base_interval": 2.4},
+	# Basic Drill tuned to the PDF's low drill tier (Scrap/Bronze Drill). It scales
+	# up through the Machine Damage / Speed upgrades rather than through drill tiers.
+	"buy_drill":     {"base_damage": 1, "base_interval": 2.8},
 	"buy_hammer":    {"base_damage": 3, "base_interval": 3.5, "splash": 22},
 	"buy_linedrill": {"base_damage": 4, "base_interval": 2.0, "pierce": 2},
 	"buy_deepbore":  {"base_damage": 6, "base_interval": 1.5},
@@ -288,6 +348,7 @@ var UPGRADE_ORDER := [
 	"buy_drill", "buy_hammer", "buy_linedrill", "buy_deepbore",
 	"buy_conveyor", "buy_scanner", "buy_fuel", "buy_crusher",
 	"drill_speed", "drill_power",
+	"buy_elevator", "buy_drillevator",
 ]
 
 # ---------------------------------------------------------------------------
@@ -303,10 +364,13 @@ var SKILL_PATHS := ["Manual", "Golem", "Machinery"]
 # Nodes per ring (index 0 = ring 1). Sums to 34 per section -> 102 total.
 const _RING_COUNTS := [3, 4, 5, 5, 5, 5, 4, 2, 1]
 
-# Stat pools per section: [stat, mode, per_level, label]
+# Stat pools per section: [stat, mode, per_level, label]. Damage stats use "mult"
+# so the PDF's percentage caps are meaningful; per_level magnitudes here are only
+# relative weights -- _normalize_skill_caps() rescales each capped stat so a fully
+# maxed section lands exactly on its SKILL_CAPS total.
 var _SKILL_POOLS := {
 	"Manual": [
-		["click_damage", "add", 2.0, "Click Damage"],
+		["click_damage", "mult", 0.05, "Click Damage"],
 		["click_cooldown", "cooldown", 0.03, "Click Cooldown"],
 		["crit_chance", "add", 0.03, "Crit Chance"],
 		["crit_damage", "add", 0.25, "Crit Damage"],
@@ -316,17 +380,27 @@ var _SKILL_POOLS := {
 		["exp_mult", "mult", 0.05, "EXP Gain"],
 	],
 	"Golem": [
-		["ai_damage", "add", 1.0, "Golem Damage"],
+		["ai_damage_mult", "mult", 0.05, "Golem Damage"],
 		["ai_interval", "cooldown", 0.03, "Golem Speed"],
 		["ai_resource_bonus", "add", 0.08, "Golem Resource Yield"],
 		["exp_mult", "mult", 0.04, "EXP Gain"],
 	],
 	"Machinery": [
-		["machine_damage", "add", 1.0, "Machine Damage"],
+		["machine_damage_mult", "mult", 0.05, "Machine Damage"],
 		["machine_speed", "cooldown", 0.03, "Machine Speed"],
 		["resource_mult", "mult", 0.05, "Resource Yield"],
 		["exp_mult", "mult", 0.04, "EXP Gain"],
 	],
+}
+
+# PDF "Max General Bonus" caps: the TOTAL bonus a fully-maxed general skill tree
+# grants for each stat. mult stats -> +fraction; cooldown stats -> -fraction.
+# (Specializations, unbuilt, would push a single style further on top of these.)
+var SKILL_CAPS := {
+	"click_damage": 1.5, "click_cooldown": 0.4,
+	"ai_damage_mult": 1.5, "ai_interval": 0.4,
+	"machine_damage_mult": 1.5, "machine_speed": 0.4,
+	"resource_mult": 1.0, "exp_mult": 1.0,
 }
 
 func _size_for_ring(ring: int) -> String:
@@ -377,22 +451,84 @@ func _build_skill_tree() -> void:
 				}
 				this_ring.append({"id": id, "angle": angle})
 			prev_ring = this_ring
+	_normalize_skill_caps()
+
+## Rescale each capped stat's per_level so that maxing every node of that stat
+## across the whole tree lands exactly on its SKILL_CAPS total. Node effects stack
+## multiplicatively in get_effective_stats (mult: *= 1+per*lvl; cooldown:
+## *= (1-per)^lvl), so we solve for a scale k that makes the combined product hit
+## the target, then regenerate each node's description from the new per_level.
+func _normalize_skill_caps() -> void:
+	for stat in SKILL_CAPS:
+		var cap: float = float(SKILL_CAPS[stat])
+		var nodes: Array = []
+		for id in SKILLS:
+			if SKILLS[id]["stat"] == stat:
+				nodes.append(SKILLS[id])
+		if nodes.is_empty():
+			continue
+		var mode: String = nodes[0]["mode"]
+		var target: float = (1.0 + cap) if mode == "mult" else (1.0 - cap)
+		var k := _solve_skill_scale(nodes, mode, target)
+		for n in nodes:
+			n["per_level"] = float(n["per_level"]) * k
+			n["desc"] = _effect_desc(n["stat"], n["mode"], n["per_level"])
+
+## Bisection for the scale factor k such that the maxed combined product equals
+## `target`. mult product increases with k; cooldown product decreases with k.
+func _solve_skill_scale(nodes: Array, mode: String, target: float) -> float:
+	var increasing: bool = (mode == "mult")
+	var lo := 0.0
+	var hi := 1.0
+	# Grow hi until the product brackets the target (guard against runaway).
+	var guard := 0
+	while guard <= 60:
+		var p: float = _skill_product(nodes, mode, hi)
+		var bracketed: bool = (p >= target) if increasing else (p <= target)
+		if bracketed:
+			break
+		hi *= 2.0
+		guard += 1
+	for _i in range(60):
+		var mid := (lo + hi) * 0.5
+		var p2: float = _skill_product(nodes, mode, mid)
+		var too_low: bool = (p2 < target) if increasing else (p2 > target)
+		if too_low:
+			lo = mid
+		else:
+			hi = mid
+	return (lo + hi) * 0.5
+
+func _skill_product(nodes: Array, mode: String, k: float) -> float:
+	var prod := 1.0
+	for n in nodes:
+		var per: float = float(n["per_level"]) * k
+		var lvl: int = int(n["max_level"])
+		if mode == "mult":
+			prod *= (1.0 + per * lvl)
+		else:   # cooldown
+			prod *= pow(maxf(0.0, 1.0 - per), lvl)
+	return prod
 
 func _roman(n: int) -> String:
 	var r := ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"]
 	return r[clampi(n - 1, 0, r.size() - 1)]
 
-func _effect_desc(stat: String, mode: String, per: float) -> String:
-	var label: String = {
+## Human-readable name for a stat key (used in skill descriptions/tooltips).
+func stat_label(stat: String) -> String:
+	return {
 		"click_damage": "click damage", "click_cooldown": "click cooldown",
 		"crit_chance": "crit chance", "crit_damage": "crit damage",
 		"manual_resource_bonus": "manual resource yield", "deep_bonus": "depth damage",
 		"lucky_chance": "lucky chance", "exp_mult": "EXP gain",
-		"ai_damage": "golem damage", "ai_interval": "golem interval",
+		"ai_damage": "golem damage", "ai_damage_mult": "golem damage", "ai_interval": "golem interval",
 		"ai_resource_bonus": "golem resource yield",
-		"machine_damage": "machine damage", "machine_speed": "machine interval",
+		"machine_damage": "machine damage", "machine_damage_mult": "machine damage", "machine_speed": "machine interval",
 		"resource_mult": "resource yield",
 	}.get(stat, stat)
+
+func _effect_desc(stat: String, mode: String, per: float) -> String:
+	var label := stat_label(stat)
 	match mode:
 		"add":
 			if per < 1.0:
@@ -402,6 +538,28 @@ func _effect_desc(stat: String, mode: String, per: float) -> String:
 			return "+%d%% %s / level" % [int(round(per * 100)), label]
 		"cooldown":
 			return "-%d%% %s / level" % [int(round(per * 100)), label]
+	return label
+
+## The *cumulative* effect a skill grants at a given level (0 = none yet).
+## e.g. Click Cooldown at level 2 -> "-12% click cooldown". Used by tooltips.
+func skill_total_desc(id: String, level: int) -> String:
+	if not SKILLS.has(id):
+		return ""
+	if level <= 0:
+		return "no bonus yet"
+	var n: Dictionary = SKILLS[id]
+	var stat: String = n["stat"]
+	var per: float = float(n["per_level"])
+	var label := stat_label(stat)
+	match n["mode"]:
+		"add":
+			if per < 1.0:
+				return "+%d%% %s" % [int(round(per * level * 100)), label]
+			return "+%s %s" % [str(per * level).trim_suffix(".0"), label]
+		"mult":
+			return "+%d%% %s" % [int(round(per * level * 100)), label]
+		"cooldown":
+			return "-%d%% %s" % [int(round((1.0 - pow(1.0 - per, level)) * 100)), label]
 	return label
 
 # ---------------------------------------------------------------------------
@@ -420,44 +578,51 @@ func _effect_desc(stat: String, mode: String, per: float) -> String:
 #   dup_chance           chance to double a manually-mined resource drop
 #   refund_chance/_amount  chance a manual break refunds a fraction of cooldown
 # ---------------------------------------------------------------------------
+# Per-pickaxe upgrade multipliers (levels 1..5; level 1 = base). From the PDF's
+# "Pickaxe Upgrade Levels" table. Applied to the equipped pickaxe's base damage.
+const PICKAXE_UPGRADE_MULT := [1.0, 1.2, 1.45, 1.75, 2.10]
+
+# Base damage & costs from the balance-pass PDF. Coin costs are the PDF's pickaxe-
+# tier coin costs exactly (coins are the main economy gate via the Crusher); themed
+# material amounts are set to attainable values given the new resource-tile counts.
 var PICKAXES := [
 	{"tier": 0, "name": "Wooden Pickaxe", "biome": 0, "base_damage": 1, "cost": {},
 		"desc": "Crude starter tool.", "effect": {}},
-	{"tier": 1, "name": "Rootbound Pickaxe", "biome": 0, "base_damage": 3,
-		"cost": {"rock": 40, "wood": 20, "coins": 50},
+	{"tier": 1, "name": "Rootbound Pickaxe", "biome": 0, "base_damage": 4,
+		"cost": {"rock": 25, "wood": 10, "coins": 50},
 		"desc": "Hardened roots & stone. Dependable early damage.", "effect": {}},
-	{"tier": 2, "name": "Bronze Pickaxe", "biome": 1, "base_damage": 6,
-		"cost": {"copper": 40, "coal": 25, "coins": 150},
+	{"tier": 2, "name": "Bronze Pickaxe", "biome": 1, "base_damage": 8,
+		"cost": {"copper": 40, "coal": 20, "coins": 250},
 		"desc": "Faster swings, pushes through stone.", "effect": {"cooldown_mult": 0.92}},
-	{"tier": 3, "name": "Iron Pickaxe", "biome": 2, "base_damage": 11,
-		"cost": {"iron": 35, "resin": 15, "cave_moss": 15, "coins": 400},
+	{"tier": 3, "name": "Iron Pickaxe", "biome": 2, "base_damage": 20,
+		"cost": {"iron": 60, "resin": 25, "coins": 900},
 		"desc": "Sturdy, reliable power.", "effect": {}},
-	{"tier": 4, "name": "Crystal Pickaxe", "biome": 3, "base_damage": 18,
-		"cost": {"blue_crystal": 20, "quartz": 25, "silver": 15, "coins": 900},
+	{"tier": 4, "name": "Crystal Pickaxe", "biome": 3, "base_damage": 30,
+		"cost": {"blue_crystal": 30, "quartz": 40, "silver": 20, "coins": 2500},
 		"desc": "Chance to shatter: splashes adjacent tiles. +resource yield.",
-		"effect": {"shatter_chance": 0.25, "shatter_damage": 8, "rare_resource_bonus": 0.25}},
-	{"tier": 5, "name": "Ember Pickaxe", "biome": 4, "base_damage": 30,
-		"cost": {"ember": 20, "sulfur": 20, "obsidian": 12, "coins": 1800},
+		"effect": {"shatter_chance": 0.25, "shatter_damage": 20, "rare_resource_bonus": 0.25}},
+	{"tier": 5, "name": "Ember Pickaxe", "biome": 4, "base_damage": 55,
+		"cost": {"ember": 40, "sulfur": 40, "obsidian": 20, "coins": 6500},
 		"desc": "Scorching hits burst nearby tiles.",
 		"effect": {"shatter_chance": 0.22, "shatter_damage": 16}},
-	{"tier": 6, "name": "Relic Pickaxe", "biome": 5, "base_damage": 48,
-		"cost": {"relic": 10, "gold": 25, "rune": 10, "coins": 3500},
+	{"tier": 6, "name": "Relic Pickaxe", "biome": 5, "base_damage": 95,
+		"cost": {"relic": 20, "gold": 50, "rune": 20, "coins": 15000},
 		"desc": "Chance to duplicate drops & refund cooldown.",
 		"effect": {"dup_chance": 0.2, "refund_chance": 0.25, "refund_amount": 0.5}},
-	{"tier": 7, "name": "Mycelium Pickaxe", "biome": 6, "base_damage": 75,
-		"cost": {"deep_iron": 20, "mycelium": 20, "glowcap": 12, "coins": 6500},
+	{"tier": 7, "name": "Mycelium Pickaxe", "biome": 6, "base_damage": 160,
+		"cost": {"deep_iron": 40, "mycelium": 40, "glowcap": 20, "coins": 34000},
 		"desc": "Spore bursts splash tiles. +EXP from filler.",
 		"effect": {"shatter_chance": 0.3, "shatter_damage": 40, "filler_exp_bonus": 0.5}},
-	{"tier": 8, "name": "Titanium Pickaxe", "biome": 7, "base_damage": 120,
-		"cost": {"titanium": 15, "pressure_gem": 8, "black_coal": 20, "coins": 12000},
+	{"tier": 8, "name": "Titanium Pickaxe", "biome": 7, "base_damage": 270,
+		"cost": {"titanium": 30, "pressure_gem": 15, "black_coal": 40, "coins": 75000},
 		"desc": "Heavy industrial damage; scales with depth.",
 		"effect": {"depth_bonus": 1.0}},
-	{"tier": 9, "name": "Astral Pickaxe", "biome": 8, "base_damage": 190,
-		"cost": {"astral": 10, "moon": 12, "prismatic": 8, "coins": 22000},
+	{"tier": 9, "name": "Astral Pickaxe", "biome": 8, "base_damage": 460,
+		"cost": {"astral": 20, "moon": 25, "prismatic": 15, "coins": 160000},
 		"desc": "Chance to instantly break a tile; scales with depth.",
 		"effect": {"instant_chance": 0.1, "depth_bonus": 2.0}},
-	{"tier": 10, "name": "Core Pickaxe", "biome": 9, "base_damage": 300,
-		"cost": {"heartstone": 8, "core_fragment": 6, "ancient_energy": 5, "coins": 40000},
+	{"tier": 10, "name": "Core Pickaxe", "biome": 9, "base_damage": 780,
+		"cost": {"heartstone": 15, "core_fragment": 12, "ancient_energy": 8, "coins": 350000},
 		"desc": "Core pulse splashes nearby tiles. +rare yield & instant chance.",
 		"effect": {"shatter_chance": 0.35, "shatter_damage": 200, "rare_resource_bonus": 0.5, "instant_chance": 0.08}},
 ]
@@ -477,37 +642,37 @@ var PICKAXES := [
 const GOLEM_COST_GROWTH := 1.45
 
 var GOLEMS := [
-	{"tier": 1, "name": "Rootstone Golem", "biome": 0, "base_damage": 1, "interval": 3.0,
+	{"tier": 1, "name": "Rootstone Golem", "biome": 0, "base_damage": 4, "interval": 0.7,
 		"cost": {"rock": 60, "wood": 30, "coins": 40}, "effect": {},
 		"desc": "Slow, cheap starter miner."},
-	{"tier": 2, "name": "Bronze Golem", "biome": 1, "base_damage": 2, "interval": 2.6,
+	{"tier": 2, "name": "Bronze Golem", "biome": 1, "base_damage": 8, "interval": 0.6,
 		"cost": {"copper": 40, "coal": 25, "coins": 120}, "effect": {},
 		"desc": "Faster, sturdier automation."},
-	{"tier": 3, "name": "Ironbark Golem", "biome": 2, "base_damage": 4, "interval": 2.4,
+	{"tier": 3, "name": "Ironbark Golem", "biome": 2, "base_damage": 18, "interval": 0.6,
 		"cost": {"iron": 35, "resin": 15, "coins": 280}, "effect": {"double_hit_chance": 0.15},
 		"desc": "Occasionally strikes twice."},
-	{"tier": 4, "name": "Crystal Golem", "biome": 3, "base_damage": 7, "interval": 2.2,
+	{"tier": 4, "name": "Crystal Golem", "biome": 3, "base_damage": 36, "interval": 0.6,
 		"cost": {"blue_crystal": 18, "quartz": 20, "silver": 12, "coins": 600},
 		"effect": {"prefer_resource": true, "res_bonus": 0.15},
 		"desc": "Seeks out resource tiles."},
-	{"tier": 5, "name": "Ember Golem", "biome": 4, "base_damage": 14, "interval": 2.7,
+	{"tier": 5, "name": "Ember Golem", "biome": 4, "base_damage": 68, "interval": 0.6,
 		"cost": {"ember": 18, "sulfur": 18, "obsidian": 10, "coins": 1200}, "effect": {},
 		"desc": "Slow but heavy hits; hard-block breaker."},
-	{"tier": 6, "name": "Relic Golem", "biome": 5, "base_damage": 24, "interval": 2.2,
+	{"tier": 6, "name": "Relic Golem", "biome": 5, "base_damage": 125, "interval": 0.6,
 		"cost": {"relic": 8, "gold": 20, "rune": 8, "coins": 2200}, "effect": {"res_bonus": 0.25},
 		"desc": "Bonus resources from what it mines."},
-	{"tier": 7, "name": "Spore Golem", "biome": 6, "base_damage": 40, "interval": 2.2,
+	{"tier": 7, "name": "Spore Golem", "biome": 6, "base_damage": 225, "interval": 0.6,
 		"cost": {"deep_iron": 18, "mycelium": 18, "glowcap": 10, "coins": 4000},
 		"effect": {"splash_chance": 0.25, "splash_damage": 20},
 		"desc": "Spore bursts damage nearby tiles."},
-	{"tier": 8, "name": "Pressure Golem", "biome": 7, "base_damage": 75, "interval": 2.0,
+	{"tier": 8, "name": "Pressure Golem", "biome": 7, "base_damage": 405, "interval": 0.6,
 		"cost": {"titanium": 12, "pressure_gem": 6, "black_coal": 16, "coins": 7500}, "effect": {},
 		"desc": "Deep-layer workhorse."},
-	{"tier": 9, "name": "Astral Golem", "biome": 8, "base_damage": 130, "interval": 1.8,
+	{"tier": 9, "name": "Astral Golem", "biome": 8, "base_damage": 720, "interval": 0.6,
 		"cost": {"astral": 8, "moon": 10, "prismatic": 6, "coins": 14000},
 		"effect": {"prefer_resource": true, "splash_chance": 0.2, "splash_damage": 80},
 		"desc": "Smart miner; targets valuables & bursts."},
-	{"tier": 10, "name": "Core Golem", "biome": 9, "base_damage": 220, "interval": 1.7,
+	{"tier": 10, "name": "Core Golem", "biome": 9, "base_damage": 1240, "interval": 0.6,
 		"cost": {"heartstone": 6, "core_fragment": 5, "ancient_energy": 4, "coins": 26000},
 		"effect": {"splash_chance": 0.3, "splash_damage": 200, "res_bonus": 0.3},
 		"desc": "Endgame leader; shockwaves on break."},
@@ -522,8 +687,8 @@ const TEX_DIR := "res://assets/tile_materials/"
 
 var TILE_TEXTURES := {
 	# L1 Shallow Dirtworks
-	"dirt": "tile_r1_c1.png", "packed_dirt": "tile_r1_c2.png", "loose_stone": "tile_r1_c4.png",
-	"rock": "tile_r1_c6.png", "wood": "tile_r1_c7.png",
+	"dirt": "tile_r1_c1.png", "packed_dirt": "tile_r1_c2.png", "loose_stone": "tile_r1_c6.png",
+	"rock": "tile_r1_c4.png", "wood": "tile_r1_c7.png",
 	# L2 Stone Veins
 	"stone": "tile_r2_c1.png", "gravel": "tile_r2_c2.png", "hard_dirt": "tile_r2_c4.png",
 	"copper": "tile_r2_c6.png", "coal": "tile_r2_c7.png",

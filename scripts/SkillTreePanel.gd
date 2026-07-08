@@ -6,6 +6,9 @@ extends Control
 
 signal closed
 
+var _pixel_font: Font = load("res://assets/fonts/VT323/VT323-Regular.ttf")
+var _header_font: Font = load("res://assets/fonts/Press_Start_2P/PressStart2P-Regular.ttf")
+
 const SECTION_COLOR := {
 	"Manual": Color8(255, 150, 90),
 	"Golem": Color8(120, 220, 140),
@@ -23,7 +26,8 @@ var _dragging := false
 var _drag_moved := 0.0
 
 var _points_lbl: Label
-var _info_lbl: RichTextLabel
+var _tip_panel: PanelContainer      # floating tooltip that follows the cursor
+var _tip_lbl: RichTextLabel
 var _fitted := false
 
 func _ready() -> void:
@@ -73,34 +77,35 @@ func _build_overlay() -> void:
 	hb.add_child(close_btn)
 
 	var hint := Label.new()
-	hint.text = "Drag to pan  ·  Wheel to zoom  ·  Click a node to spend a point"
+	hint.text = "Drag to pan  ·  Wheel to zoom  ·  Left-click a node to buy  ·  Right-click to refund (coins)"
 	hint.add_theme_font_size_override("font_size", 13)
 	hint.add_theme_color_override("font_color", Color8(160, 165, 180))
 	hint.mouse_filter = Control.MOUSE_FILTER_IGNORE
 	add_child(hint)
 	hint.set_anchors_and_offsets_preset(Control.PRESET_CENTER_TOP, Control.PRESET_MODE_KEEP_SIZE, 16)
 
-	# Info box (bottom-left)
-	var info := PanelContainer.new()
+	# Floating tooltip (follows the cursor while hovering a node).
+	_tip_panel = PanelContainer.new()
 	var sb2 := StyleBoxFlat.new()
-	sb2.bg_color = Color(0, 0, 0, 0.6)
-	sb2.set_content_margin_all(12)
-	sb2.set_corner_radius_all(8)
-	info.add_theme_stylebox_override("panel", sb2)
-	info.custom_minimum_size = Vector2(340, 0)
-	info.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	add_child(info)
-	info.set_anchors_and_offsets_preset(Control.PRESET_BOTTOM_LEFT, Control.PRESET_MODE_KEEP_SIZE, 14)
-	_info_lbl = RichTextLabel.new()
-	_info_lbl.bbcode_enabled = true
-	_info_lbl.fit_content = true
-	_info_lbl.custom_minimum_size = Vector2(316, 0)
-	_info_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
-	info.add_child(_info_lbl)
-	_update_info()
+	sb2.bg_color = Color(0.06, 0.06, 0.09, 0.95)
+	sb2.set_border_width_all(1)
+	sb2.border_color = Color(1, 1, 1, 0.18)
+	sb2.set_content_margin_all(10)
+	sb2.set_corner_radius_all(6)
+	_tip_panel.add_theme_stylebox_override("panel", sb2)
+	_tip_panel.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_tip_panel.visible = false
+	add_child(_tip_panel)
+	_tip_lbl = RichTextLabel.new()
+	_tip_lbl.bbcode_enabled = true
+	_tip_lbl.fit_content = true
+	_tip_lbl.custom_minimum_size = Vector2(300, 0)
+	_tip_lbl.mouse_filter = Control.MOUSE_FILTER_IGNORE
+	_tip_panel.add_child(_tip_lbl)
 
 func _refresh_points() -> void:
-	_points_lbl.text = "Skill Points: %d   (Level %d)" % [GameState.skill_points_available(), GameState.get_level()]
+	_points_lbl.text = "Skill Points: %d   ·   Coins: %d   (Level %d)" % [
+		GameState.skill_points_available(), GameState.money, GameState.get_level()]
 
 # --- drawing ---
 func _view_center() -> Vector2:
@@ -137,13 +142,13 @@ func _draw() -> void:
 		draw_circle(p, rad, col)
 		if id == _hovered:
 			draw_arc(p, rad + 3.0 * _zoom, 0, TAU, 24, Color.WHITE, 2.0 * _zoom)
-	# section labels
-	var font := ThemeDB.fallback_font
+	# section labels (blocky header font)
+	var font: Font = _header_font if _header_font != null else ThemeDB.fallback_font
 	for si in range(GameData.SKILL_PATHS.size()):
 		var section: String = GameData.SKILL_PATHS[si]
 		var a := deg_to_rad(-90.0 + si * 120.0)
 		var lp := c + Vector2(cos(a), sin(a)) * (RING0 + 8.5 * RING_STEP) * _zoom
-		draw_string(font, lp - Vector2(40, 0), section, HORIZONTAL_ALIGNMENT_CENTER, 90, 20, SECTION_COLOR[section])
+		draw_string(font, lp - Vector2(110, 0), section, HORIZONTAL_ALIGNMENT_CENTER, 220, 14, SECTION_COLOR[section])
 
 func _node_color(id: String, section: String) -> Color:
 	var base: Color = SECTION_COLOR[section]
@@ -189,8 +194,14 @@ func _gui_input(event: InputEvent) -> void:
 					if _drag_moved < 6.0 and _hovered != "":
 						if GameState.buy_skill(_hovered):
 							_refresh_points()
-							_update_info()
+							_update_tooltip(event.position)
 							queue_redraw()
+			MOUSE_BUTTON_RIGHT:
+				if event.pressed and _hovered != "":
+					if GameState.refund_skill(_hovered):
+						_refresh_points()
+						_update_tooltip(event.position)
+						queue_redraw()
 	elif event is InputEventMouseMotion:
 		if _dragging:
 			_pan += event.relative
@@ -198,25 +209,50 @@ func _gui_input(event: InputEvent) -> void:
 		var h := _hit_test(event.position)
 		if h != _hovered:
 			_hovered = h
-			_update_info()
+		_update_tooltip(event.position)
 		queue_redraw()
 
-func _update_info() -> void:
+func _update_tooltip(mpos: Vector2) -> void:
 	if _hovered == "" or not GameData.SKILLS.has(_hovered):
-		_info_lbl.text = "[color=#aab]Hover a node for details.[/color]"
+		_tip_panel.visible = false
 		return
 	var n: Dictionary = GameData.SKILLS[_hovered]
 	var lvl := GameState.skill_level(_hovered)
 	var maxl := int(n["max_level"])
 	var col: Color = SECTION_COLOR[n["section"]]
-	var state := ""
+	var nl := "%c" % 10
+	# Exact effect: per-level rate, current cumulative total, next level.
+	var lines := "[b][color=#%s]%s[/color][/b]  [color=#99a](%s node)[/color]" % [col.to_html(false), n["name"], n["size"]]
+	lines += nl + "[color=#ccd]%s[/color]" % n["desc"]
+	if lvl > 0:
+		lines += nl + "Now (Lv %d): [color=#8f8]%s[/color]" % [lvl, GameData.skill_total_desc(_hovered, lvl)]
+	if lvl < maxl:
+		lines += nl + "Next (Lv %d): [color=#ffd]%s[/color]" % [lvl + 1, GameData.skill_total_desc(_hovered, lvl + 1)]
+	lines += nl + "[color=#99a]Level %d / %d   ·   Cost %d pt[/color]" % [lvl, maxl, int(n["cost"])]
+	# Buy state.
+	lines += nl
 	if GameState.is_skill_maxed(_hovered):
-		state = "[color=#8f8]MAXED[/color]"
+		lines += "[color=#8f8]MAXED[/color]"
 	elif not GameState.skill_unlocked(_hovered):
-		state = "[color=#f88]LOCKED (needs prior node)[/color]"
+		lines += "[color=#f88]LOCKED — buy the prior node first[/color]"
 	elif GameState.skill_points_available() >= int(n["cost"]):
-		state = "[color=#ff6]Click to buy[/color]"
+		lines += "[color=#ff6]Left-click to buy[/color]"
 	else:
-		state = "[color=#f88]Not enough points[/color]"
-	_info_lbl.text = "[b][color=#%s]%s[/color][/b]  (%s)\n%s\nLevel %d / %d   ·   Cost: %d pt\n%s" % [
-		col.to_html(false), n["name"], n["size"], n["desc"], lvl, maxl, int(n["cost"]), state]
+		lines += "[color=#f88]Not enough skill points[/color]"
+	# Refund state (coins).
+	if lvl > 0:
+		var rc := GameState.skill_refund_cost(_hovered)
+		if GameState.can_refund_skill(_hovered):
+			lines += nl + "[color=#7cf]Right-click: refund 1 level (−%d coins)[/color]" % rc
+		elif GameState.skill_level(_hovered) == 1 and GameState.skill_has_owned_dependents(_hovered):
+			lines += nl + "[color=#f88]Can't refund: reclaim dependent nodes first[/color]"
+		else:
+			lines += nl + "[color=#f88]Refund needs %d coins[/color]" % rc
+	_tip_lbl.text = lines
+	_tip_panel.visible = true
+	# Position near the cursor, clamped to stay on-screen.
+	var ts := _tip_panel.get_combined_minimum_size()
+	var pos := mpos + Vector2(18, 18)
+	pos.x = clampf(pos.x, 0.0, maxf(0.0, size.x - ts.x))
+	pos.y = clampf(pos.y, 0.0, maxf(0.0, size.y - ts.y))
+	_tip_panel.position = pos
