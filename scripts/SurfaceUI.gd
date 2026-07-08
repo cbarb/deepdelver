@@ -6,6 +6,7 @@ extends Control
 ## Rebuilt from data each refresh(). Built entirely from code-styled Controls.
 
 signal start_run
+signal quit_to_title
 
 # --- palette (dark umber/brown; gold reserved for coins/CTAs, not everywhere) ---
 const C_BG := Color8(18, 14, 10)
@@ -209,6 +210,16 @@ func _build_header(outer: VBoxContainer) -> void:
 	crow.add_child(dot)
 	_coins_lbl = _lbl("0", 20, C_AMBER)
 	crow.add_child(_coins_lbl)
+
+	# Menu (return to the title screen; progress is already saved per-action).
+	var menu_btn := Button.new()
+	menu_btn.text = "MENU"
+	menu_btn.add_theme_font_size_override("font_size", 11)
+	menu_btn.custom_minimum_size = Vector2(96, 40)
+	menu_btn.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	_style_button(menu_btn, C_CARD, C_TEXT, C_CARD_BORDER, 1)
+	menu_btn.pressed.connect(_on_menu)
+	hb.add_child(menu_btn)
 
 func _build_left(cols: HBoxContainer) -> void:
 	var col := VBoxContainer.new()
@@ -652,6 +663,25 @@ func _fill_skills() -> void:
 	open_btn.pressed.connect(_open_skill_tree)
 	_skill_body.add_child(open_btn)
 
+	# Specialization launcher + status.
+	var spec_avail := GameState.spec_points_available()
+	var locked := GameState.spec_locked_to()
+	var spec_txt := "Spec points free: %d" % spec_avail
+	if locked != "":
+		spec_txt += "  ·  %s" % GameData.SPECIALIZATIONS[locked]["name"]
+	var srow := HBoxContainer.new()
+	_skill_body.add_child(srow)
+	srow.add_child(_lbl(spec_txt, 16, C_GREEN if spec_avail > 0 else C_PURPLE_TXT.darkened(0.1)))
+	var spec_btn := Button.new()
+	spec_btn.text = "SPECIALIZE" + ("  ●" if spec_avail > 0 else "")
+	spec_btn.add_theme_font_size_override("font_size", 12)
+	spec_btn.custom_minimum_size = Vector2(0, 44)
+	var spec_bg := C_AMBER if spec_avail > 0 else C_PURPLE_BG.lightened(0.05)
+	var spec_fg := C_DARK_TXT if spec_avail > 0 else C_PURPLE_TXT
+	_style_button(spec_btn, spec_bg, spec_fg, C_PURPLE_BORDER, 2)
+	spec_btn.pressed.connect(_open_spec_panel)
+	_skill_body.add_child(spec_btn)
+
 func _fill_crusher() -> void:
 	_clear(_crusher_body)
 	_crusher_body.add_child(_wrap_lbl("Smash leftover Rubble into shiny Coins at camp.", 18, C_MUTED))
@@ -704,6 +734,10 @@ func _open_depth_select() -> void:
 		start_run.emit())
 	panel.canceled.connect(func():
 		panel.queue_free())
+func _on_menu() -> void:
+	GameState.save_game()
+	quit_to_title.emit()
+
 func _on_buy_pickaxe() -> void:
 	if GameState.buy_next_pickaxe():
 		refresh()
@@ -726,6 +760,13 @@ func _on_crush() -> void:
 
 func _open_skill_tree() -> void:
 	var panel := SkillTreePanel.new()
+	add_child(panel)
+	panel.closed.connect(func():
+		panel.queue_free()
+		refresh())
+
+func _open_spec_panel() -> void:
+	var panel := SpecializationPanel.new()
 	add_child(panel)
 	panel.closed.connect(func():
 		panel.queue_free()

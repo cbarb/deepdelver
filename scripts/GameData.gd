@@ -623,8 +623,8 @@ var PICKAXES := [
 		"effect": {"instant_chance": 0.1, "depth_bonus": 2.0}},
 	{"tier": 10, "name": "Core Pickaxe", "biome": 9, "base_damage": 780,
 		"cost": {"heartstone": 15, "core_fragment": 12, "ancient_energy": 8, "coins": 350000},
-		"desc": "Core pulse splashes nearby tiles. +rare yield & instant chance.",
-		"effect": {"shatter_chance": 0.35, "shatter_damage": 200, "rare_resource_bonus": 0.5, "instant_chance": 0.08}},
+		"desc": "Core pulse snakes through a chain of nearby tiles. +rare yield & instant chance.",
+		"effect": {"chain_mult": 6.0, "rare_resource_bonus": 0.5, "instant_chance": 0.08}},
 ]
 
 # ---------------------------------------------------------------------------
@@ -776,6 +776,68 @@ func get_pickaxe_cursor(tier: int) -> Texture2D:
 			tex = ImageTexture.create_from_image(img)
 	_cursor_cache[tier] = tex
 	return tex
+
+# ---------------------------------------------------------------------------
+# SPECIALIZATIONS  (design doc: 3 specs, 7 skills each, pick only 4)
+#   Spec points are earned at biome milestones (reach biome 3/5/7/9 = 4 total).
+#   Picking the first skill in a spec LOCKS OUT the other two specs' skills;
+#   normal skill-tree nodes stay open. The numeric effect of each skill lives in
+#   GameState._apply_specialization() (keyed by id); here we hold display data.
+# ---------------------------------------------------------------------------
+const SPEC_MILESTONE_BIOMES := [2, 4, 6, 8]   # biome indices (biome 3/5/7/9) that each grant +1 point
+const SPEC_MAX_PICKS := 4
+
+var SPECIALIZATIONS := {
+	"striker": {
+		"name": "Striker", "style": "Manual", "color": Color8(226, 182, 92),
+		"blurb": "You are the mine's cutting edge. Clicking becomes fast, heavy and rewarding.",
+		"skills": [
+			{"id": "striker_power_swing", "name": "Power Swing", "desc": "Manual clicks deal +60% damage."},
+			{"id": "striker_quick_hands", "name": "Quick Hands", "desc": "-25% click cooldown."},
+			{"id": "striker_weak_point", "name": "Weak Point", "desc": "+25% crit chance and +0.5x crit damage."},
+			{"id": "striker_shatter", "name": "Shatter Strike", "desc": "Breaking a tile splashes heavy damage onto exposed neighbours."},
+			{"id": "striker_frenzy", "name": "Mining Frenzy", "desc": "Breaking a resource tile grants a few seconds of faster, harder swings."},
+			{"id": "striker_precision", "name": "Precision Extraction", "desc": "Manually mined resource tiles drop +75% materials."},
+			{"id": "striker_relentless", "name": "Relentless Delver", "desc": "Manual damage scales up the deeper you dig this run."},
+		],
+	},
+	"stonewarden": {
+		"name": "Stonewarden", "style": "Golem", "color": Color8(126, 202, 100),
+		"blurb": "You command a crew of mining golems. Strength comes from the whole team.",
+		"skills": [
+			{"id": "warden_commander", "name": "Golem Commander", "desc": "All golems: +40% damage and 20% faster."},
+			{"id": "warden_focus", "name": "Focus Orders", "desc": "Golems prioritise resource tiles."},
+			{"id": "warden_quarry", "name": "Living Quarry", "desc": "Each golem owned adds +4% damage to all golems."},
+			{"id": "warden_sync", "name": "Synchronized Strike", "desc": "Coordinated crew: +15% golem damage."},
+			{"id": "warden_bond", "name": "Ancient Bond", "desc": "Doubles the chance of golem unique effects (double-hit / splash)."},
+			{"id": "warden_efficient", "name": "Efficient Workers", "desc": "Golem-mined tiles yield +50% materials."},
+			{"id": "warden_endless", "name": "Endless Crew", "desc": "Start each run with +1 active golem scaled to your deepest biome."},
+		],
+	},
+	"engineer": {
+		"name": "Engineer", "style": "Machine", "color": Color8(140, 175, 220),
+		"blurb": "You run an industrial dig site. Machines scale as a network.",
+		"skills": [
+			{"id": "eng_motors", "name": "Overclocked Motors", "desc": "All machinery works 25% faster."},
+			{"id": "eng_drillbits", "name": "Reinforced Drill Bits", "desc": "+40% machine damage."},
+			{"id": "eng_fuel", "name": "Fuel Mastery", "desc": "Fuel lasts longer and gives a stronger machine boost."},
+			{"id": "eng_network", "name": "Industrial Network", "desc": "Each machine owned adds +3% damage to all machines."},
+			{"id": "eng_sorter", "name": "Auto-Sorter", "desc": "Machine-mined tiles yield +50% materials."},
+			{"id": "eng_deepbore", "name": "Deep Bore Protocol", "desc": "Machines deal bonus damage that scales with depth."},
+			{"id": "eng_aftershift", "name": "Aftershift Automation", "desc": "Machinery keeps mining for 5s after the run timer ends."},
+		],
+	},
+}
+
+const SPEC_ORDER := ["striker", "stonewarden", "engineer"]
+
+## Which specialization (if any) a spec-skill id belongs to.
+func spec_of_skill(id: String) -> String:
+	for spec in SPECIALIZATIONS:
+		for sk in SPECIALIZATIONS[spec]["skills"]:
+			if sk["id"] == id:
+				return spec
+	return ""
 
 var _tex_cache := {}
 

@@ -4,7 +4,9 @@ extends Node
 ## records. Also computes the player's *effective* stats from all bonuses and
 ## handles buying things + save/load.
 
-const SAVE_PATH := "user://deepdelver_save.json"
+const SAVE_PATH := "user://deepdelver_save.json"   # legacy single-slot save (pre-slots); migrated into slot 1
+
+var current_slot: int = 0               # 1..3 once a slot is chosen on the title screen; 0 = none
 
 var resources: Dictionary = {}          # resource_id -> amount (int)
 var money: int = 0
@@ -16,6 +18,8 @@ var max_depth: int = 0                   # best depth ever (meters)
 var pickaxe_tier: int = 0                # owned pickaxe tier (index into GameData.PICKAXES)
 var pickaxe_upgrade_levels: Dictionary = {}  # tier(int) -> upgrade level 1..5 (1 = base)
 var golems: Dictionary = {}              # tier(int) -> count owned
+var specialization: String = ""          # "" until chosen; then "striker"/"stonewarden"/"engineer" (locks the others)
+var spec_skills: Dictionary = {}         # spec_skill_id -> true (each owned once; max SPEC_MAX_PICKS total)
 var last_summary: Dictionary = {}        # summary of the most recent run
 var use_transport: bool = true           # (legacy) transport ride flag; superseded by selected_start_depth
 var selected_start_depth: int = -1       # depth (m) chosen on the descent screen; -1 = unset -> default deepest
@@ -46,10 +50,20 @@ var _base_stats := {
 	"dup_chance": 0.0,
 	"refund_chance": 0.0,
 	"refund_amount": 0.0,
+	"chain_mult": 0.0,              # Core pickaxe: manual break snakes a chain; budget = click_damage * this
+	# specialization-driven fields (read by MineController at runtime)
+	"manual_frenzy": 0.0,            # Striker: >0 enables the resource-break frenzy buff
+	"golem_prefer_resource": 0.0,    # Stonewarden: >0 makes all golems prefer resource tiles
+	"golem_unique_mult": 1.0,        # Stonewarden: multiplies golem unique-effect chances
+	"golem_active_bonus": 0.0,       # Stonewarden: extra active golems summoned per run
+	"machine_resource_bonus": 0.0,   # Engineer: extra yield on machine-mined tiles
+	"machine_deep_bonus": 0.0,       # Engineer: extra machine damage per 100m depth
+	"fuel_bonus": 0.0,               # Engineer: >0 = stronger, longer-lasting fuel
+	"machine_aftershift": 0.0,       # Engineer: seconds machines keep running after the timer
 }
 
 func _ready() -> void:
-	load_game()
+	_migrate_legacy_save()   # slot is chosen from the title screen; no auto-load here
 
 # ---------------------------------------------------------------------------
 # Effective stats
@@ -73,10 +87,12 @@ func get_effective_stats() -> Dictionary:
 	s["dup_chance"] = float(eff.get("dup_chance", 0.0))
 	s["refund_chance"] = float(eff.get("refund_chance", 0.0))
 	s["refund_amount"] = float(eff.get("refund_amount", 0.0))
+	s["chain_mult"] = float(eff.get("chain_mult", 0.0))
 	for id in GameData.UPGRADES:
 		_apply_effect(s, GameData.UPGRADES[id], int(upgrade_levels.get(id, 0)))
 	for id in GameData.SKILLS:
 		_apply_effect(s, GameData.SKILLS[id], int(skill_levels.get(id, 0)))
+	_apply_specialization(s)   # spec skills stack on top of the general tree
 	# Count-based values.
 	s["ai_count"] = golem_count()
 	s["drill_count"] = int(upgrade_levels.get("buy_drill", 0))
@@ -109,6 +125,109 @@ func _apply_effect(s: Dictionary, def: Dictionary, level: int) -> void:
 			s[stat] *= pow(1.0 - per, level)
 
 # ---------------------------------------------------------------------------
+# Specializations
+# ---------------------------------------------------------------------------
+func has_spec_skill(id: String) -> bool:
+	return bool(spec_skills.get(id, false))
+
+## Fold the chosen specialization's picked skills into the effective stats. Some
+## skills only set a flag/field that MineController reads at runtime.
+func _apply_specialization(s: Dictionary) -> void:
+	if spec_skills.is_empty():
+		return
+	# --- Striker (manual) ---
+	if has_spec_skill("striker_power_swing"):
+		s["click_damage"] *= 1.6
+	if has_spec_skill("striker_quick_hands"):
+		s["click_cooldown"] *= 0.75
+	if has_spec_skill("striker_weak_point"):
+		s["crit_chance"] += 0.25
+		s["crit_damage"] += 0.5
+	if has_spec_skill("striker_shatter"):
+		s["shatter_chance"] = maxf(s["shatter_chance"], 0.5)
+		s["shatter_damage"] = maxf(s["shatter_damage"], s["click_damage"] * 3.0)
+	if has_spec_skill("striker_frenzy"):
+		s["manual_frenzy"] = 1.0
+	if has_spec_skill("striker_precision"):
+		s["manual_resource_bonus"] += 0.75
+	if has_spec_skill("striker_relentless"):
+		s["deep_bonus"] += 0.5
+	# --- Stonewarden (golem) ---
+	if has_spec_skill("warden_commander"):
+		s["ai_damage_mult"] *= 1.4
+		s["ai_interval"] *= 0.8
+	if has_spec_skill("warden_focus"):
+		s["golem_prefer_resource"] = 1.0
+	if has_spec_skill("warden_quarry"):
+		s["ai_damage_mult"] *= (1.0 + 0.04 * float(golem_count()))
+	if has_spec_skill("warden_sync"):
+		s["ai_damage_mult"] *= 1.15
+	if has_spec_skill("warden_bond"):
+		s["golem_unique_mult"] *= 2.0
+	if has_spec_skill("warden_efficient"):
+		s["ai_resource_bonus"] += 0.5
+	if has_spec_skill("warden_endless"):
+		s["golem_active_bonus"] += 1.0
+	# --- Engineer (machinery) ---
+	if has_spec_skill("eng_motors"):
+		s["machine_speed"] *= 0.75
+	if has_spec_skill("eng_drillbits"):
+		s["machine_damage_mult"] *= 1.4
+	if has_spec_skill("eng_fuel"):
+		s["fuel_bonus"] += 1.0
+	if has_spec_skill("eng_network"):
+		var machines := 0
+		for k in ["buy_drill", "buy_hammer", "buy_linedrill", "buy_deepbore"]:
+			machines += int(upgrade_levels.get(k, 0))
+		s["machine_damage_mult"] *= (1.0 + 0.03 * float(machines))
+	if has_spec_skill("eng_sorter"):
+		s["machine_resource_bonus"] += 0.5
+	if has_spec_skill("eng_deepbore"):
+		s["machine_deep_bonus"] += 0.5
+	if has_spec_skill("eng_aftershift"):
+		s["machine_aftershift"] += 5.0
+
+## Total spec points earned so far, from best-depth biome milestones.
+func spec_points_total() -> int:
+	var bi := GameData.biome_index_for_row(max_depth)
+	var pts := 0
+	for m in GameData.SPEC_MILESTONE_BIOMES:
+		if bi >= int(m):
+			pts += 1
+	return pts
+
+func spec_points_spent() -> int:
+	return spec_skills.size()
+
+func spec_points_available() -> int:
+	return spec_points_total() - spec_points_spent()
+
+## Which spec (if any) is currently locked in. Empty = free to choose any.
+func spec_locked_to() -> String:
+	return specialization
+
+func can_pick_spec_skill(id: String) -> bool:
+	var spec := GameData.spec_of_skill(id)
+	if spec == "" or has_spec_skill(id):
+		return false
+	if specialization != "" and specialization != spec:
+		return false                       # locked into another specialization
+	return spec_points_available() >= 1
+
+func buy_spec_skill(id: String) -> bool:
+	if not can_pick_spec_skill(id):
+		return false
+	specialization = GameData.spec_of_skill(id)   # first pick locks the spec in
+	spec_skills[id] = true
+	return true
+
+## Clear the specialization and refund all its picks (respec; used by debug now,
+## could back a paid respec button later).
+func clear_specialization() -> void:
+	specialization = ""
+	spec_skills.clear()
+
+# ---------------------------------------------------------------------------
 # Economy helpers
 # ---------------------------------------------------------------------------
 func add_resource(id: String, amount: int) -> void:
@@ -130,8 +249,12 @@ func get_level() -> int:
 
 ## {level, into (exp into current level), need (exp to next level)}
 func level_progress() -> Dictionary:
+	return _level_progress_for(lifetime_exp)
+
+## Same computation for an arbitrary lifetime-EXP total (used to peek at save slots).
+func _level_progress_for(total: int) -> Dictionary:
 	var lvl := 1
-	var rem := lifetime_exp
+	var rem := total
 	var need := _exp_for_next(lvl)
 	while rem >= need:
 		rem -= need
@@ -396,21 +519,86 @@ func refund_skill(id: String) -> bool:
 # ---------------------------------------------------------------------------
 # Save / Load
 # ---------------------------------------------------------------------------
+# --- Save slots (1..3). Each slot is its own JSON file. ---
+func save_path(slot: int) -> String:
+	return "user://deepdelver_save_%d.json" % slot
+
+func has_slot(slot: int) -> bool:
+	return FileAccess.file_exists(save_path(slot))
+
+## Peek at a slot's file for the title screen without disturbing live state.
+## Returns {exists:false} for empty slots, else {exists, level, max_depth, money}.
+func slot_info(slot: int) -> Dictionary:
+	if not has_slot(slot):
+		return {"exists": false}
+	var f := FileAccess.open(save_path(slot), FileAccess.READ)
+	if not f:
+		return {"exists": false}
+	var parsed = JSON.parse_string(f.get_as_text())
+	f.close()
+	if typeof(parsed) != TYPE_DICTIONARY:
+		return {"exists": false}
+	var lp := _level_progress_for(int(parsed.get("lifetime_exp", 0)))
+	return {
+		"exists": true,
+		"level": int(lp["level"]),
+		"max_depth": int(parsed.get("max_depth", 0)),
+		"money": int(parsed.get("money", 0)),
+	}
+
+## Start a fresh game in `slot` (wipes any existing data there).
+func new_game(slot: int) -> void:
+	current_slot = slot
+	_reset_state()
+	save_game()
+
+## Make `slot` the active slot and load its data (or a clean state if empty).
+func load_slot(slot: int) -> void:
+	current_slot = slot
+	_reset_state()
+	if has_slot(slot):
+		load_game()
+
+func delete_slot(slot: int) -> void:
+	var d := DirAccess.open("user://")
+	var fname := "deepdelver_save_%d.json" % slot
+	if d and d.file_exists(fname):
+		d.remove(fname)
+	if current_slot == slot:
+		current_slot = 0
+
+## One-time copy of the old single-file save into slot 1 so existing progress survives.
+func _migrate_legacy_save() -> void:
+	if not FileAccess.file_exists(SAVE_PATH) or has_slot(1):
+		return
+	var rf := FileAccess.open(SAVE_PATH, FileAccess.READ)
+	if not rf:
+		return
+	var txt := rf.get_as_text()
+	rf.close()
+	var wf := FileAccess.open(save_path(1), FileAccess.WRITE)
+	if wf:
+		wf.store_string(txt)
+		wf.close()
+
 func save_game() -> void:
+	if current_slot <= 0:
+		return
 	var data := {
 		"resources": resources, "money": money, "exp": exp, "lifetime_exp": lifetime_exp,
 		"upgrade_levels": upgrade_levels, "skill_levels": skill_levels, "max_depth": max_depth,
 		"pickaxe_tier": pickaxe_tier, "pickaxe_upgrade_levels": pickaxe_upgrade_levels, "golems": golems,
+		"specialization": specialization, "spec_skills": spec_skills,
 	}
-	var f := FileAccess.open(SAVE_PATH, FileAccess.WRITE)
+	var f := FileAccess.open(save_path(current_slot), FileAccess.WRITE)
 	if f:
 		f.store_string(JSON.stringify(data))
 		f.close()
 
 func load_game() -> void:
-	if not FileAccess.file_exists(SAVE_PATH):
+	if current_slot <= 0 or not has_slot(current_slot):
 		return
-	var f := FileAccess.open(SAVE_PATH, FileAccess.READ)
+	var f := FileAccess.open(save_path(current_slot), FileAccess.READ)
 	if not f:
 		return
 	var parsed = JSON.parse_string(f.get_as_text())
@@ -427,12 +615,22 @@ func load_game() -> void:
 	pickaxe_tier = int(parsed.get("pickaxe_tier", 0))
 	pickaxe_upgrade_levels = _to_int_keyed_dict(parsed.get("pickaxe_upgrade_levels", {}))
 	golems = _to_int_keyed_dict(parsed.get("golems", {}))
+	specialization = str(parsed.get("specialization", ""))
+	spec_skills = _to_bool_dict(parsed.get("spec_skills", {}))
 
 func _to_int_dict(d) -> Dictionary:
 	var out := {}
 	if typeof(d) == TYPE_DICTIONARY:
 		for k in d:
 			out[k] = int(d[k])
+	return out
+
+func _to_bool_dict(d) -> Dictionary:
+	var out := {}
+	if typeof(d) == TYPE_DICTIONARY:
+		for k in d:
+			if bool(d[k]):
+				out[str(k)] = true
 	return out
 
 ## Like _to_int_dict but also converts keys to int (JSON stringifies dict keys).
@@ -443,7 +641,8 @@ func _to_int_keyed_dict(d) -> Dictionary:
 			out[int(k)] = int(d[k])
 	return out
 
-func reset_progress() -> void:
+## Clear all progression to a fresh state, in memory only (no save).
+func _reset_state() -> void:
 	resources.clear()
 	money = 0
 	exp = 0
@@ -454,5 +653,11 @@ func reset_progress() -> void:
 	pickaxe_tier = 0
 	pickaxe_upgrade_levels.clear()
 	golems.clear()
+	specialization = ""
+	spec_skills.clear()
 	last_summary.clear()
+	selected_start_depth = -1
+
+func reset_progress() -> void:
+	_reset_state()
 	save_game()

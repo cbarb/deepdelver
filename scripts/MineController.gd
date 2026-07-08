@@ -49,6 +49,9 @@ var cam_focus_row := 4.0
 var cooldown_left := 0.0
 var hovered: TileBlock = null
 var ortho_size := 13.0
+var _frenzy_left := 0.0            # Striker - Mining Frenzy: seconds of buffed manual mining remaining
+var _aftershifting := false        # Engineer - Aftershift Automation: machines-only tail after the timer
+var _aftershift_left := 0.0
 
 # --- run summary accumulators ---
 var tiles_mined := 0
@@ -68,12 +71,9 @@ var _fuel_timer := 0.0
 var _chains: Array = []           # each: {current, overflow, source, res_bonus, chained, origin, cd}
 
 const DIRS := [Vector2i(0, -1), Vector2i(0, 1), Vector2i(-1, 0), Vector2i(1, 0)]
-const SURROUND := [                 # 8 blocks around a tile (for overflow splash)
-	Vector2i(-1, -1), Vector2i(0, -1), Vector2i(1, -1),
-	Vector2i(-1, 0),                   Vector2i(1, 0),
-	Vector2i(-1, 1), Vector2i(0, 1), Vector2i(1, 1),
-]
-const OVERFLOW_STAGGER := 0.05      # seconds between each chain-reaction hop (chain saved for later)
+const OVERFLOW_MAX_RADIUS := 14     # furthest ring the radial overflow blast can reach
+const OVERFLOW_STAGGER := 0.05      # seconds between each chain-reaction hop
+const CHAIN_SEEK_RADIUS := 7        # how far the snaking chain looks ahead for resource tiles
 const MINER_GRAVITY := 22.0         # miners fall (never jump)
 const MINER_WALK := 3.5             # miner horizontal walk speed
 const WORKER_Z := 0.6               # z offset so workers sit in front of blocks
@@ -119,6 +119,9 @@ func _reset_run() -> void:
 	_start_depth = 0
 	cam_focus_row = 4.0
 	cooldown_left = 0.0
+	_frenzy_left = 0.0
+	_aftershifting = false
+	_aftershift_left = 0.0
 	tiles_mined = 0
 	run_exp = 0
 	run_money = 0
@@ -265,9 +268,19 @@ func _spawn_block(pos: Vector2i) -> void:
 func _process(delta: float) -> void:
 	if not running:
 		return
-	time_left -= delta
 	cooldown_left = maxf(0.0, cooldown_left - delta)
+	_frenzy_left = maxf(0.0, _frenzy_left - delta)
+	if _aftershifting:
+		_run_aftershift(delta)      # timer is up: only machines keep working
+		return
+	time_left -= delta
 	if time_left <= 0.0:
+		# Engineer - Aftershift Automation: give machines a short overtime tail.
+		if stats.get("machine_aftershift", 0.0) > 0.0 and not _machines.is_empty():
+			_aftershifting = true
+			_aftershift_left = stats["machine_aftershift"]
+			hud.flash("AFTERSHIFT!", Color8(140, 175, 220))
+			return
 		_end_run()
 		return
 
@@ -278,6 +291,17 @@ func _process(delta: float) -> void:
 	_process_chains(delta)
 	_update_camera(false)
 	_update_hud()
+
+## Overtime phase: player and golems are done, machines finish their tail.
+func _run_aftershift(delta: float) -> void:
+	_aftershift_left -= delta
+	_process_machines(delta)
+	_process_chains(delta)
+	_update_camera(false)
+	_update_hud()
+	if _aftershift_left <= 0.0:
+		_aftershifting = false
+		_end_run()
 
 func _update_camera(instant: bool) -> void:
 	var target := maxf(float(frontier) + 3.0, 4.0)
@@ -395,6 +419,8 @@ func _unhandled_input(event: InputEvent) -> void:
 				ortho_size = clampf(ortho_size + 1.0, 7.0, 30.0)
 
 func _try_player_mine() -> void:
+	if _aftershifting:
+		return
 	if cooldown_left > 0.0:
 		hud.flash("On cooldown", Color8(255, 200, 90))
 		return
@@ -404,9 +430,13 @@ func _try_player_mine() -> void:
 	if not is_mineable(tb.grid_pos):
 		hud.flash("Blocked - no open side", Color8(255, 90, 90))
 		return
-	cooldown_left = stats["click_cooldown"]
+	# Striker - Mining Frenzy: active buff = faster swings + more damage.
+	var frenzy: bool = _frenzy_left > 0.0
+	cooldown_left = stats["click_cooldown"] * (0.6 if frenzy else 1.0)
 	hud.swing()
 	var dmg := _manual_damage(tb.grid_pos)
+	if frenzy:
+		dmg *= 1.5
 	var is_crit: bool = rng.randf() < stats["crit_chance"]
 	if is_crit:
 		dmg *= stats["crit_damage"]
@@ -430,9 +460,12 @@ func _damage_tile(pos: Vector2i, dmg: float, source: String, res_bonus: float) -
 	var before := tb.remaining()
 	if tb.apply_damage(dmg):
 		_break_tile(pos, source, res_bonus)
-		# Damage overflow: leftover damage is split evenly across surrounding blocks.
+		# Damage overflow: the Core pickaxe snakes it through a chain of tiles;
+		# everything else splits the leftover across the 8 surrounding blocks.
 		var overflow := dmg - before
-		if overflow > 0.0:
+		if source == "manual" and stats["chain_mult"] > 0.0:
+			_overflow_chain(pos, maxf(overflow, 0.0) + stats["click_damage"] * stats["chain_mult"], "manual", res_bonus)
+		elif overflow > 0.0:
 			_overflow_splash(pos, overflow, source, res_bonus)
 		if source == "manual":
 			_manual_break_effects(pos)
@@ -440,35 +473,67 @@ func _damage_tile(pos: Vector2i, dmg: float, source: String, res_bonus: float) -
 	return false
 
 ## Pickaxe on-break effects (manual mining only): shatter splash + cooldown refund.
+## (The Core pickaxe's snaking chain is seeded from the overflow in _damage_tile.)
 func _manual_break_effects(origin: Vector2i) -> void:
 	if stats["shatter_damage"] > 0.0 and rng.randf() < stats["shatter_chance"]:
 		_overflow_splash(origin, stats["shatter_damage"], "manual", stats["manual_resource_bonus"])
 	if stats["refund_amount"] > 0.0 and rng.randf() < stats["refund_chance"]:
 		cooldown_left = maxf(0.0, cooldown_left - stats["click_cooldown"] * stats["refund_amount"])
 
-## Overflow splash: the leftover damage from a broken tile is divided evenly
-## among all surrounding solid blocks and applied in one pass (no chaining).
+## Radial overflow blast: leftover damage expands outward from the origin one
+## circular LAYER at a time. If the budget can break the whole layer, that layer
+## shatters and the remaining damage (budget - layer's total HP) rolls out to the
+## next layer; this repeats outward until a layer is too tough to fully break, at
+## which point the last of the budget is spread across it and the blast stops.
 func _overflow_splash(origin: Vector2i, overflow: float, source: String, res_bonus: float) -> void:
-	var targets: Array[Vector2i] = []
-	for d in SURROUND:
-		var np: Vector2i = origin + d
-		if is_solid(np):
-			targets.append(np)
-	if targets.is_empty():
-		return
-	var share := overflow / float(targets.size())
-	for np in targets:
-		_spawn_block(np)
-		var tb: TileBlock = blocks.get(np)
-		if not is_instance_valid(tb):
-			continue
-		if tb.apply_damage(share):
-			_break_tile(np, source, res_bonus)   # any excess on this block is lost (no chain)
+	var budget := overflow
+	var radius := 1
+	while budget > 0.0 and radius <= OVERFLOW_MAX_RADIUS:
+		var ring := _ring_tiles(origin, radius)
+		if not ring.is_empty():
+			# Total HP needed to break this whole layer.
+			var layer_hp := 0.0
+			for np in ring:
+				_spawn_block(np)
+				var tb: TileBlock = blocks.get(np)
+				if is_instance_valid(tb):
+					layer_hp += tb.remaining()
+			if budget >= layer_hp:
+				# Enough to shatter the entire layer; the remainder rolls onward.
+				for np in ring:
+					var tb2: TileBlock = blocks.get(np)
+					if is_instance_valid(tb2):
+						tb2.apply_damage(tb2.remaining())
+						_break_tile(np, source, res_bonus)
+				budget -= layer_hp
+			else:
+				# Can't break the whole layer -> spend what's left here, then stop.
+				var share := budget / float(ring.size())
+				for np in ring:
+					var tb3: TileBlock = blocks.get(np)
+					if is_instance_valid(tb3) and tb3.apply_damage(share):
+						_break_tile(np, source, res_bonus)
+				budget = 0.0
+		radius += 1
 
-# --- SHELVED: damage-overflow chain reaction (kept for later, currently unused) ---
-## Queues a damage-overflow chain reaction that propagates one tile per
-## OVERFLOW_STAGGER seconds (advanced in _process_chains), so it reads as a
-## travelling cascade rather than an instant wipe.
+## Solid tiles whose distance from origin rounds to `radius` -> one circular ring.
+func _ring_tiles(origin: Vector2i, radius: int) -> Array[Vector2i]:
+	var out: Array[Vector2i] = []
+	for dy in range(-radius, radius + 1):
+		for dx in range(-radius, radius + 1):
+			if dx == 0 and dy == 0:
+				continue
+			if int(round(sqrt(float(dx * dx + dy * dy)))) != radius:
+				continue
+			var np := origin + Vector2i(dx, dy)
+			if is_solid(np):
+				out.append(np)
+	return out
+
+# --- Snaking chain reaction (Core pickaxe's on-break effect) ---
+## Queues a damage-overflow chain that propagates to a random adjacent solid tile
+## one hop per OVERFLOW_STAGGER seconds (advanced in _process_chains), so it reads
+## as a snake travelling through the rock rather than an instant splash.
 func _overflow_chain(origin: Vector2i, overflow: float, source: String, res_bonus: float) -> void:
 	_chains.append({
 		"current": origin, "overflow": overflow, "source": source,
@@ -493,18 +558,67 @@ func _process_chains(delta: float) -> void:
 			_popup(world_pos(ch["origin"]), "CHAIN x%d" % (int(ch["chained"]) + 1), Color8(255, 160, 60))
 	_chains = still
 
-## One hop of a chain: bleed the leftover damage into a random adjacent solid
+## Rarity weight of a solid tile for chain-seeking: 2 = rare resource, 1 = common
+## resource, 0 = filler/barrier. Reads the grid directly (no spawned block needed).
+func _tile_rarity(pos: Vector2i) -> int:
+	var t: Dictionary = grid.get(pos, {})
+	if t.get("type", "filler") != "resource":
+		return 0
+	return 2 if String(t.get("rarity", "common")) == "rare" else 1
+
+## Nearest resource tile to `from` within CHAIN_SEEK_RADIUS. Prioritises vicinity
+## (smallest Manhattan distance); rarity only breaks ties. Returns null if none.
+func _nearest_resource(from: Vector2i):
+	var best = null
+	var best_dist := 1 << 30
+	var best_rar := -1
+	for dy in range(-CHAIN_SEEK_RADIUS, CHAIN_SEEK_RADIUS + 1):
+		for dx in range(-CHAIN_SEEK_RADIUS, CHAIN_SEEK_RADIUS + 1):
+			var p := from + Vector2i(dx, dy)
+			var rar := _tile_rarity(p)
+			if rar == 0 or not is_solid(p):
+				continue
+			var dist: int = absi(dx) + absi(dy)
+			if dist < best_dist or (dist == best_dist and rar > best_rar):
+				best_dist = dist
+				best_rar = rar
+				best = p
+	return best
+
+## Pick the chain's next hop: steer toward the nearest resource tile (vicinity
+## first, rarity as tie-break); if none is in range, snake through a random
+## adjacent solid tile. Returns null when boxed in.
+func _pick_chain_next(current: Vector2i):
+	var cands: Array[Vector2i] = []
+	for d in DIRS:
+		var np: Vector2i = current + d
+		if is_solid(np):
+			cands.append(np)
+	if cands.is_empty():
+		return null
+	var goal = _nearest_resource(current)
+	if goal == null:
+		return cands[rng.randi_range(0, cands.size() - 1)]
+	# Move to the neighbour nearest the goal; prefer a resource cell, then rarity.
+	var best: Vector2i = cands[0]
+	var best_dist := 1 << 30
+	var best_rar := -1
+	for np in cands:
+		var dist: int = absi(np.x - goal.x) + absi(np.y - goal.y)
+		var rar := _tile_rarity(np)
+		if dist < best_dist or (dist == best_dist and rar > best_rar):
+			best_dist = dist
+			best_rar = rar
+			best = np
+	return best
+
+## One hop of a chain: bleed the leftover damage into the chosen adjacent solid
 ## tile, breaking it (and continuing) or partially damaging it (and stopping).
 func _advance_chain(ch: Dictionary) -> void:
-	var options: Array[Vector2i] = []
-	for d in DIRS:
-		var np: Vector2i = ch["current"] + d
-		if is_solid(np):
-			options.append(np)
-	if options.is_empty():
+	var target = _pick_chain_next(ch["current"])
+	if target == null:
 		ch["overflow"] = 0.0                          # dead end -> finished
 		return
-	var target: Vector2i = options[rng.randi_range(0, options.size() - 1)]
 	_spawn_block(target)
 	var tb: TileBlock = blocks.get(target)
 	if not is_instance_valid(tb):
@@ -571,6 +685,12 @@ func _break_tile(pos: Vector2i, source: String, res_bonus: float) -> void:
 		rare_found += 1
 		if label != "":
 			_popup(world_pos(pos), label, tile.get("color", Color.WHITE))
+		# Striker - Mining Frenzy: breaking a resource tile by hand refreshes the buff.
+		if source == "manual" and stats.get("manual_frenzy", 0.0) > 0.0:
+			var was_active := _frenzy_left > 0.0
+			_frenzy_left = 4.0
+			if not was_active:
+				hud.flash("MINING FRENZY!", Color8(255, 200, 90))
 	else:
 		# Filler yields Rubble -> crushed into Coins at the surface.
 		var amt := maxi(1, int(round(1.0 * mult)))
@@ -630,8 +750,9 @@ func _spawn_workers() -> void:
 
 	# Golems from the Workshop roster. Active golems are capped to the biome
 	# reached (Biome N -> N max active), spawning the strongest tiers first.
-	# (A future Stonewarden specialization would raise this cap.)
-	var max_active: int = GameData.biome_index_for_row(GameState.max_depth) + 1
+	# Stonewarden's Endless Crew raises the cap with extra temporary golems.
+	var deepest_biome: int = GameData.biome_index_for_row(GameState.max_depth)
+	var max_active: int = deepest_biome + 1
 	var owned_tiers: Array = []
 	for tier in GameState.golems:
 		for i in range(int(GameState.golems[tier])):
@@ -641,24 +762,35 @@ func _spawn_workers() -> void:
 	if owned_tiers.size() > max_active:
 		owned_tiers.resize(max_active)
 	for tier in owned_tiers:
-		var g := GameState.golem_data(tier)
-		var eff: Dictionary = g.get("effect", {})
-		var dmg: float = (float(g["base_damage"]) + stats["ai_damage"]) * stats["ai_damage_mult"]
-		var interval: float = maxf(0.4, float(g["interval"]) * stats["ai_interval"])
-		var rbon: float = stats["ai_resource_bonus"] + float(eff.get("res_bonus", 0.0))
-		var col := Color.from_hsv(lerpf(0.33, 0.55, float(tier - 1) / 9.0), 0.6, 0.95)
-		workers.append(_make_worker("golem", col, interval, dmg, rbon, {
-			"prefer_resource": bool(eff.get("prefer_resource", false)),
-			"double_hit": float(eff.get("double_hit_chance", 0.0)),
-			"splash_chance": float(eff.get("splash_chance", 0.0)),
-			"splash_damage": float(eff.get("splash_damage", 0.0)),
-		}))
+		_add_golem_worker(tier)
+	# Stonewarden - Endless Crew: bonus temporary golems scaled to the deepest biome.
+	var bonus: int = int(stats.get("golem_active_bonus", 0.0))
+	for i in range(bonus):
+		_add_golem_worker(clampi(deepest_biome + 1, 1, GameData.GOLEMS.size()))
+
 	# Basic Drills (flying machines).
 	var dm: Dictionary = GameData.MACHINES["buy_drill"]
 	var d_int: float = maxf(0.3, float(dm["base_interval"]) * stats["machine_speed"])
 	var d_dmg: float = (float(dm["base_damage"]) + stats["machine_damage"]) * stats["machine_damage_mult"]
 	for i in range(int(stats["drill_count"])):
-		workers.append(_make_worker("drill", Color8(255, 150, 60), d_int, d_dmg, 0.0, {}))
+		workers.append(_make_worker("drill", Color8(255, 150, 60), d_int, d_dmg, stats["machine_resource_bonus"], {}))
+
+## Build one golem worker of the given tier, folding in Stonewarden spec skills
+## (global resource-preference + doubled unique-effect chances).
+func _add_golem_worker(tier: int) -> void:
+	var g := GameState.golem_data(tier)
+	var eff: Dictionary = g.get("effect", {})
+	var dmg: float = (float(g["base_damage"]) + stats["ai_damage"]) * stats["ai_damage_mult"]
+	var interval: float = maxf(0.4, float(g["interval"]) * stats["ai_interval"])
+	var rbon: float = stats["ai_resource_bonus"] + float(eff.get("res_bonus", 0.0))
+	var col := Color.from_hsv(lerpf(0.33, 0.55, float(tier - 1) / 9.0), 0.6, 0.95)
+	var umult: float = stats.get("golem_unique_mult", 1.0)
+	workers.append(_make_worker("golem", col, interval, dmg, rbon, {
+		"prefer_resource": bool(eff.get("prefer_resource", false)) or stats.get("golem_prefer_resource", 0.0) > 0.0,
+		"double_hit": clampf(float(eff.get("double_hit_chance", 0.0)) * umult, 0.0, 1.0),
+		"splash_chance": clampf(float(eff.get("splash_chance", 0.0)) * umult, 0.0, 1.0),
+		"splash_damage": float(eff.get("splash_damage", 0.0)),
+	}))
 
 func _make_worker(kind: String, color: Color, interval: float, damage: float, res_bonus: float, effect: Dictionary) -> Dictionary:
 	var node := MeshInstance3D.new()
@@ -782,7 +914,7 @@ func _process_drill(w: Dictionary, delta: float) -> void:
 	w["cd"] -= delta
 	if w["cd"] <= 0.0 and node.global_position.distance_to(tpos) < BLOCK * 1.3:
 		w["cd"] = w["interval"]
-		_damage_tile(target, w["damage"], "drill", w["res_bonus"])
+		_damage_tile(target, w["damage"] + _machine_deep_dmg(int(target.y)), "drill", w["res_bonus"])
 
 ## True if a *different* worker is currently assigned to this tile.
 func _target_taken_by_other(self_w: Dictionary, pos: Vector2i) -> bool:
@@ -861,13 +993,17 @@ func _process_machines(delta: float) -> void:
 	if _machines.is_empty():
 		return
 	# Fuel Engine: burn coal to speed up all machines while fuelled.
+	# Engineer - Fuel Mastery: stronger boost + fuel burns slower (lasts longer).
 	var fuel_mult := 1.0
+	var mastery: bool = stats.get("fuel_bonus", 0.0) > 0.0
 	var fl := int(stats["fuel_level"])
 	if fl > 0 and _has_fuel():
-		fuel_mult = maxf(0.4, 1.0 - 0.08 * fl)
+		var per_level := 0.12 if mastery else 0.08
+		fuel_mult = maxf(0.3 if mastery else 0.4, 1.0 - per_level * fl)
 		_fuel_timer += delta
-		if _fuel_timer >= FUEL_BURN:
-			_fuel_timer -= FUEL_BURN
+		var burn_period := FUEL_BURN * 2.0 if mastery else FUEL_BURN
+		if _fuel_timer >= burn_period:
+			_fuel_timer -= burn_period
 			_burn_fuel()
 	var mmult: float = stats["machine_damage_mult"]
 	var mdmg: float = stats["machine_damage"]
@@ -887,16 +1023,21 @@ func _burn_fuel() -> void:
 	elif int(GameState.resources.get("black_coal", 0)) > 0:
 		GameState.resources["black_coal"] = int(GameState.resources["black_coal"]) - 1
 
+## Engineer - Deep Bore Protocol: extra machine damage that scales with depth.
+func _machine_deep_dmg(row: int) -> float:
+	return stats.get("machine_deep_bonus", 0.0) * (float(row) / 100.0) * stats["machine_damage_mult"]
+
 func _fire_machine(mac: Dictionary, mdmg: float, mmult: float) -> void:
-	var dmg: float = (mac["base_damage"] + mdmg) * mmult
+	var base_dmg: float = (mac["base_damage"] + mdmg) * mmult
+	var rbon: float = stats["machine_resource_bonus"]   # Engineer - Auto-Sorter
 	match mac["kind"]:
 		"hammer":
 			var t = _random_exposed()
 			if t == null:
 				return
 			mac["node"].global_position = world_pos(t) + Vector3(0, 0, WORKER_Z)
-			_damage_tile(t, dmg, "machine", 0.0)
-			_overflow_splash(t, (mac["splash"] + mdmg) * mmult, "machine", 0.0)   # area slam
+			_damage_tile(t, base_dmg + _machine_deep_dmg(int(t.y)), "machine", rbon)
+			_overflow_splash(t, (mac["splash"] + mdmg) * mmult, "machine", rbon)   # area slam
 			_popup(world_pos(t), "SLAM", Color8(255, 220, 90))
 		"linedrill":
 			var seed_tile = _random_exposed()
@@ -913,7 +1054,7 @@ func _fire_machine(mac: Dictionary, mdmg: float, mmult: float) -> void:
 				var p := Vector2i(c, r)
 				if is_solid(p):
 					_spawn_block(p)
-					_damage_tile(p, dmg, "machine", 0.0)
+					_damage_tile(p, base_dmg + _machine_deep_dmg(r), "machine", rbon)
 					hits += 1
 				r += 1
 		"deepbore":
@@ -924,7 +1065,7 @@ func _fire_machine(mac: Dictionary, mdmg: float, mmult: float) -> void:
 			mac["bore_row"] = target.y
 			mac["node"].global_position = world_pos(target) + Vector3(0, 0, WORKER_Z)
 			_spawn_block(target)
-			_damage_tile(target, dmg, "machine", 0.0)
+			_damage_tile(target, base_dmg + _machine_deep_dmg(int(target.y)), "machine", rbon)
 
 func _random_exposed():
 	var opts: Array[Vector2i] = []

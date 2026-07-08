@@ -19,6 +19,8 @@ config/icon="res://icon.svg"
 
 GameData="*res://scripts/GameData.gd"
 GameState="*res://scripts/GameState.gd"
+Settings="*res://scripts/Settings.gd"
+Debug="*res://scripts/Debug.gd"
 
 [gui]
 

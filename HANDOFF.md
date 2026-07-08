@@ -51,8 +51,14 @@ A **2.5D incremental mining game** in **Godot 4.6**. Side-view; every mineable t
 ## Save format (`user://deepdelver_save.json`)
 `resources, money, exp, lifetime_exp, upgrade_levels, skill_levels, max_depth, pickaxe_tier, golems`. Note: golem/skill/upgrade **ids are keys** — renaming ids orphans old saves (fine in dev; `GameState.reset_progress()` wipes).
 
-## NEXT STEP: Specializations (per design doc)
-Not yet built. Design: 3 specializations — **Striker** (manual), **Stonewarden** (golem), **Engineer** (machinery). Each has **7 unique skills, pick only 4**. **Specialization points** earned at biome milestones (reach biome 3/5/7/9 = 4 pts total). Choosing a spec **locks out** the other two specs' unique skills (normal tree nodes stay open). Respec deferred. See the doc's "Specializations" section for the 7 skills per spec.
+## Specializations (built)
+Implemented. 3 specializations — **Striker** (manual), **Stonewarden** (golem), **Engineer** (machinery), each with **7 unique skills, pick only 4**. **Spec points** are earned at biome milestones (reach biome 3/5/7/9 = 4 pts total; `GameState.spec_points_total()` from `max_depth`). Picking the first skill in a path **locks in** that specialization and locks out the other two paths' skills (normal tree nodes stay open). Respec deferred but `GameState.clear_specialization()` exists (used by the Debug menu).
+- **Data:** `GameData.SPECIALIZATIONS` (display: name/style/color/blurb + 7 skills each) + `SPEC_MILESTONE_BIOMES` / `SPEC_MAX_PICKS`. Numeric effects live in `GameState._apply_specialization()` (keyed by skill id), folded into `get_effective_stats()` after the general tree. New effective-stat fields (`manual_frenzy`, `golem_prefer_resource`, `golem_unique_mult`, `golem_active_bonus`, `machine_resource_bonus`, `machine_deep_bonus`, `fuel_bonus`, `machine_aftershift`) are read by `MineController` at runtime.
+- **UI:** `SpecializationPanel.gd` (3-column chooser), opened via the **SPECIALIZE** button in the surface Skill Book. Debug menu can auto-pick a full spec or clear it.
+- **Simplifications:** Synchronized Strike → flat golem-damage bonus (golems still claim unique tiles, so no true co-targeting); Focus Orders does resource-priority only (not damaged-tile priority).
+
+## NEXT STEP (open)
+Refinery + Core Extractor machines (need a refined-crafting/prestige layer), endless game modes (stubbed on the descent screen), and a paid respec for specializations.
 
 ## Honest scope / simplifications to revisit
 - Skill tree **large/capstone nodes are big stat boosts**, not yet bespoke "mechanic-changing" uniques (doc examples like "every 10th click = shockwave").
