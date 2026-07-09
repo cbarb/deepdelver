@@ -23,7 +23,7 @@ const C_DARK_TXT := Color8(26, 18, 8)
 
 var _header_font: Font = load("res://assets/fonts/Press_Start_2P/PressStart2P-Regular.ttf")
 
-var _cap := 0
+var _max_biome := 0
 var _track: DepthTrack
 var _depth_lbl: Label
 var _biome_lbl: Label
@@ -31,13 +31,13 @@ var _biome_lbl: Label
 func _ready() -> void:
 	set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	mouse_filter = Control.MOUSE_FILTER_STOP
-	_cap = GameState.transport_start_depth()
-	var init_depth := GameState.selected_start_depth
-	if init_depth < 0:
-		init_depth = _cap                    # unset -> default to the deepest allowed
-	init_depth = clampi(init_depth, 0, _cap)
-	_build(init_depth)
-	_update_readout(init_depth)
+	_max_biome = GameState.transport_max_biome()
+	# Restore the last choice (derive its biome), else default to the deepest reachable.
+	var init_biome := _max_biome
+	if GameState.selected_start_depth >= 0:
+		init_biome = clampi(GameData.biome_index_for_row(GameState.selected_start_depth), 0, _max_biome)
+	_build(init_biome)
+	_update_readout(init_biome)
 
 # --- styling helpers ---
 func _sb(bg: Color, border: Color, bw: int, margin: int) -> StyleBoxFlat:
@@ -89,7 +89,7 @@ func _style_button(b: Button, bg: Color, txt: Color, border: Color, bw: int, fsi
 	b.add_theme_color_override("font_disabled_color", txt.darkened(0.35))
 
 # --- build ---
-func _build(init_depth: int) -> void:
+func _build(init_biome: int) -> void:
 	var bg := ColorRect.new()
 	bg.color = C_BG
 	add_child(bg)
@@ -121,7 +121,7 @@ func _build(init_depth: int) -> void:
 	body.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	body.add_theme_constant_override("separation", 14)
 	outer.add_child(body)
-	_build_depth_panel(body, init_depth)
+	_build_depth_panel(body, init_biome)
 	_build_mode_panel(body)
 
 	# Footer
@@ -143,10 +143,10 @@ func _build(init_depth: int) -> void:
 	go.text = "DESCEND"
 	go.custom_minimum_size = Vector2(340, 62)
 	_style_button(go, C_AMBER, C_DARK_TXT, C_AMBER.darkened(0.25), 2, 18)
-	go.pressed.connect(func(): descend.emit(_track.depth))
+	go.pressed.connect(func(): descend.emit(int(GameData.BIOMES[_track.biome]["depth_lo"])))
 	frow.add_child(go)
 
-func _build_depth_panel(body: HBoxContainer, init_depth: int) -> void:
+func _build_depth_panel(body: HBoxContainer, init_biome: int) -> void:
 	var col := VBoxContainer.new()
 	col.custom_minimum_size = Vector2(360, 0)
 	col.add_theme_constant_override("separation", 10)
@@ -158,30 +158,30 @@ func _build_depth_panel(body: HBoxContainer, init_depth: int) -> void:
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 10)
 	panel.add_child(v)
-	v.add_child(_hlbl("START DEPTH", 13, C_TITLE))
+	v.add_child(_hlbl("START BIOME", 13, C_TITLE))
 
 	# Big live readout.
-	_depth_lbl = _lbl("0 m", 30, C_AMBER)
-	v.add_child(_depth_lbl)
-	_biome_lbl = _lbl("", 18, C_TITLE)
+	_biome_lbl = _lbl("", 22, C_TITLE)
 	v.add_child(_biome_lbl)
+	_depth_lbl = _lbl("0 m", 26, C_AMBER)
+	v.add_child(_depth_lbl)
 
-	# The slider itself (centered, fills the remaining height).
+	# The biome picker (centered, fills the remaining height).
 	var track_row := HBoxContainer.new()
 	track_row.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	track_row.alignment = BoxContainer.ALIGNMENT_CENTER
 	v.add_child(track_row)
 	_track = DepthTrack.new()
-	_track.custom_minimum_size = Vector2(150, 360)
+	_track.custom_minimum_size = Vector2(200, 360)
 	_track.size_flags_vertical = Control.SIZE_EXPAND_FILL
-	_track.setup(_cap, init_depth)
+	_track.setup(_max_biome, init_biome)
 	_track.changed.connect(_update_readout)
 	track_row.add_child(_track)
 
-	if _cap <= 0:
-		v.add_child(_wrap_lbl("Build an Elevator at the camp to start deeper than the surface.", 16, C_MUTED))
+	if _max_biome <= 0:
+		v.add_child(_wrap_lbl("Build an Elevator at the camp to drop into deeper biomes.", 16, C_MUTED))
 	else:
-		v.add_child(_wrap_lbl("Drag the handle. Top = surface, bottom = your deepest reach.", 16, C_MUTED))
+		v.add_child(_wrap_lbl("Pick a discovered biome — you drop in at its start.", 16, C_MUTED))
 
 func _build_mode_panel(body: HBoxContainer) -> void:
 	var panel := _panel()
@@ -190,18 +190,29 @@ func _build_mode_panel(body: HBoxContainer) -> void:
 	body.add_child(panel)
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 10)
+	v.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	panel.add_child(v)
 	v.add_child(_hlbl("GAME MODE", 13, C_TITLE))
 
+	# Scroll the mode list so it can't overflow once every biome is discovered.
+	var scroll := ScrollContainer.new()
+	scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	scroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	v.add_child(scroll)
+	var list := VBoxContainer.new()
+	list.add_theme_constant_override("separation", 10)
+	list.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	scroll.add_child(list)
+
 	# Standard descent is the active mode.
-	v.add_child(_mode_card("Standard Descent", "A timed 60s run. Dig as deep as you can.", true))
+	list.add_child(_mode_card("Standard Descent", "A timed 60s run. Dig as deep as you can.", true))
 
 	# Endless modes per biome reached — stubbed for a future update.
 	var reached := GameData.biome_index_for_row(GameState.max_depth)
 	for i in range(reached + 1):
 		var b: Dictionary = GameData.BIOMES[i]
-		v.add_child(_mode_card("Endless · %s" % b["name"], "Mine this biome with no timer.", false))
-	v.add_child(_wrap_lbl("More modes coming soon.", 15, C_MUTED))
+		list.add_child(_mode_card("Endless · %s" % b["name"], "Mine this biome with no timer.", false))
+	list.add_child(_wrap_lbl("More modes coming soon.", 15, C_MUTED))
 
 func _mode_card(title: String, desc: String, active: bool) -> PanelContainer:
 	var border := C_AMBER.darkened(0.15) if active else C_CARD_BORDER
@@ -223,7 +234,8 @@ func _mode_card(title: String, desc: String, active: bool) -> PanelContainer:
 	v.add_child(_wrap_lbl(desc, 15, C_MUTED))
 	return card
 
-func _update_readout(depth: int) -> void:
-	_depth_lbl.text = "%d m" % depth
-	var b: Dictionary = GameData.biome_for_row(depth)
-	_biome_lbl.text = "Biome %d · %s" % [GameData.biome_index_for_row(depth) + 1, b["name"]]
+func _update_readout(biome_index: int) -> void:
+	var b: Dictionary = GameData.BIOMES[biome_index]
+	_biome_lbl.text = "Biome %d · %s" % [biome_index + 1, b["name"]]
+	var start := int(b["depth_lo"])
+	_depth_lbl.text = "Surface" if start <= 0 else "Starts at %s m" % GameData.fmt(start)

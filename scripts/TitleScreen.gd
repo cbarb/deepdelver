@@ -93,17 +93,6 @@ func _build_logo(root: VBoxContainer) -> void:
 	box.add_theme_constant_override("separation", 8)
 	root.add_child(box)
 
-	# Optional pickaxe emblem above the wordmark.
-	var tex := GameData.get_pickaxe_texture(GameData.PICKAXES.size() - 1)
-	if tex != null:
-		var icon := TextureRect.new()
-		icon.texture = tex
-		icon.custom_minimum_size = Vector2(72, 72)
-		icon.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
-		icon.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
-		icon.size_flags_horizontal = Control.SIZE_SHRINK_CENTER
-		box.add_child(icon)
-
 	var title := _hlbl("DEEP DELVER", 52, C_AMBER)
 	title.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	title.add_theme_color_override("font_outline_color", Color(0.05, 0.03, 0.02, 0.9))
@@ -169,9 +158,9 @@ func _make_slot_card(slot: int) -> Control:
 		var bi := GameData.biome_index_for_row(int(info["max_depth"]))
 		var bname: String = GameData.BIOMES[bi]["name"]
 		v.add_child(_lbl("Level %d" % int(info["level"]), 20, C_TEXT))
-		v.add_child(_lbl("Depth %d m" % int(info["max_depth"]), 18, C_MUTED))
+		v.add_child(_lbl("Depth %s m" % GameData.fmt(int(info["max_depth"])), 18, C_MUTED))
 		v.add_child(_lbl(bname, 17, C_TITLE))
-		var coins := _lbl("%d coins" % int(info["money"]), 17, C_AMBER)
+		var coins := _lbl("%s coins" % GameData.fmt(int(info["money"])), 17, C_AMBER)
 		v.add_child(coins)
 	else:
 		var empty := _lbl("No expedition yet.\nStart a fresh dig!", 18, C_MUTED)

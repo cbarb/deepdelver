@@ -148,17 +148,17 @@ func flash(text: String, color: Color) -> void:
 
 func update_hud(d: Dictionary) -> void:
 	_timer_lbl.text = "%0.1fs" % maxf(0.0, d["time"])
-	_depth_lbl.text = "Depth: %d m\n%s" % [d["depth"], GameData.biome_for_row(int(d["depth"]))["name"]]
+	_depth_lbl.text = "Depth: %s m\n%s" % [GameData.fmt(d["depth"]), GameData.biome_for_row(int(d["depth"]))["name"]]
 
 	var lp := GameState.level_progress()
-	_totals_lbl.text = "Coins: %d\nLevel %d  (%d/%d)" % [d["money"], lp["level"], lp["into"], lp["need"]]
+	_totals_lbl.text = "Coins: %s\nLevel %d  (%s/%s)" % [GameData.fmt(d["money"]), lp["level"], GameData.fmt(lp["into"]), GameData.fmt(lp["need"])]
 
 	var run_txt := ""
 	if d["run_resources"].is_empty():
 		run_txt = "(nothing yet)"
 	else:
 		for res_id in d["run_resources"]:
-			run_txt += "%s: %d\n" % [GameData.resource_name(res_id), d["run_resources"][res_id]]
+			run_txt += "%s: %s\n" % [GameData.resource_name(res_id), GameData.fmt(d["run_resources"][res_id])]
 	_run_lbl.text = run_txt
 
 	if d["tile_name"] == "":

@@ -42,6 +42,7 @@ var _base_stats := {
 	"machine_speed": 1.0,        # MULTIPLIER on machine intervals (lower = faster)
 	"machine_damage": 0.0,       # flat ADD to every machine's damage (upgrades)
 	"machine_damage_mult": 1.0,  # MULTIPLIER on total machine damage (skills; PDF-capped)
+	"all_damage_mult": 1.0,      # MULTIPLIER on ALL damage (Heart of the Delve; uncapped)
 	# pickaxe effect fields (set from the equipped pickaxe)
 	"filler_exp_bonus": 0.0,
 	"shatter_chance": 0.0,
@@ -50,7 +51,9 @@ var _base_stats := {
 	"dup_chance": 0.0,
 	"refund_chance": 0.0,
 	"refund_amount": 0.0,
-	"chain_mult": 0.0,              # Core pickaxe: manual break snakes a chain; budget = click_damage * this
+	"chain_mult": 0.0,              # (legacy) unused; Astral snake uses a fixed budget in MineController
+	"mine_unexposed": 0.0,          # Astral/Core: >0 lets manual mining hit fully-sealed blocks
+	"manual_pattern": "",           # equipped pickaxe's unique manual effect id (read by MineController)
 	# specialization-driven fields (read by MineController at runtime)
 	"manual_frenzy": 0.0,            # Striker: >0 enables the resource-break frenzy buff
 	"golem_prefer_resource": 0.0,    # Stonewarden: >0 makes all golems prefer resource tiles
@@ -88,11 +91,16 @@ func get_effective_stats() -> Dictionary:
 	s["refund_chance"] = float(eff.get("refund_chance", 0.0))
 	s["refund_amount"] = float(eff.get("refund_amount", 0.0))
 	s["chain_mult"] = float(eff.get("chain_mult", 0.0))
+	s["mine_unexposed"] = 1.0 if eff.get("mine_unexposed", false) else 0.0
+	s["manual_pattern"] = String(eff.get("pattern", ""))
 	for id in GameData.UPGRADES:
 		_apply_effect(s, GameData.UPGRADES[id], int(upgrade_levels.get(id, 0)))
 	for id in GameData.SKILLS:
 		_apply_effect(s, GameData.SKILLS[id], int(skill_levels.get(id, 0)))
 	_apply_specialization(s)   # spec skills stack on top of the general tree
+	# Heart of the Delve: fold the global damage multiplier into click damage here;
+	# golems/machines read s["all_damage_mult"] directly in MineController.
+	s["click_damage"] *= s["all_damage_mult"]
 	# Count-based values.
 	s["ai_count"] = golem_count()
 	s["drill_count"] = int(upgrade_levels.get("buy_drill", 0))
@@ -317,17 +325,42 @@ func buy_upgrade(id: String) -> bool:
 	upgrade_levels[id] = upgrade_level(id) + 1
 	return true
 
-# --- Crusher: convert stored Rubble into Coins (rate scales with Crusher level) ---
+# --- Crusher: convert stored Rubble into Coins. Each rubble tier (Rubble I..X)
+# has its own coin value (deeper = more); the Crusher level multiplies all of it. ---
 func crush_rate() -> int:
-	return int(upgrade_levels.get("buy_crusher", 0))   # coins per rubble
+	return int(upgrade_levels.get("buy_crusher", 0))   # coin multiplier per rubble value
+
+## Total rubble units held across every tier.
+func total_rubble() -> int:
+	var n := 0
+	for i in range(GameData.RUBBLE_VALUE.size()):
+		n += int(resources.get("rubble_%d" % (i + 1), 0))
+	return n
+
+## Coins the current rubble stock would yield if crushed now (0 if no Crusher).
+func rubble_coins_preview() -> int:
+	var rate := crush_rate()
+	if rate <= 0:
+		return 0
+	var coins := 0
+	for i in range(GameData.RUBBLE_VALUE.size()):
+		var id := "rubble_%d" % (i + 1)
+		coins += int(resources.get(id, 0)) * int(GameData.RUBBLE_VALUE[i]) * rate
+	return coins
 
 func crush_rubble() -> int:
-	var rubble := int(resources.get("rubble", 0))
 	var rate := crush_rate()
-	if rubble <= 0 or rate <= 0:
+	if rate <= 0:
 		return 0
-	var coins := rubble * rate
-	resources["rubble"] = 0
+	var coins := 0
+	for i in range(GameData.RUBBLE_VALUE.size()):
+		var id := "rubble_%d" % (i + 1)
+		var c := int(resources.get(id, 0))
+		if c > 0:
+			coins += c * int(GameData.RUBBLE_VALUE[i]) * rate
+			resources[id] = 0
+	if coins <= 0:
+		return 0
 	money += coins
 	return coins
 
@@ -374,17 +407,31 @@ func pickaxe_upgrade_mult() -> float:
 func is_pickaxe_upgrade_maxed(tier: int) -> bool:
 	return pickaxe_upgrade_level(tier) >= GameData.PICKAXE_UPGRADE_MULT.size()
 
-## Coin cost to raise the given pickaxe from its current level to the next.
-func pickaxe_upgrade_cost(tier: int) -> int:
+## Cost to raise the given pickaxe from its current level to the next, as a
+## {resource->amt, "coins": n} dict. Coins scale off the pickaxe's craft coin
+## cost; from Biome 3 (tier index >= 2) the upgrade also consumes a fraction of
+## the pickaxe's craft resources. Returns {} when already maxed.
+func pickaxe_upgrade_cost(tier: int) -> Dictionary:
 	var lvl := pickaxe_upgrade_level(tier)
 	if lvl >= GameData.PICKAXE_UPGRADE_MULT.size():
-		return 0
-	var craft_coins: int = int(GameData.PICKAXES[tier].get("cost", {}).get("coins", 0))
-	var base := maxi(25, craft_coins)   # Wooden starter has no craft coins; give it a floor
-	return int(round(base * float(PICKAXE_UPGRADE_COST_FACTOR[lvl - 1])))
+		return {}
+	var factor := float(PICKAXE_UPGRADE_COST_FACTOR[lvl - 1])
+	var craft: Dictionary = GameData.PICKAXES[tier].get("cost", {})
+	var base := maxi(25, int(craft.get("coins", 0)))   # Wooden starter has no craft coins; give it a floor
+	var cost := {"coins": int(round(base * factor))}
+	if int(GameData.PICKAXES[tier].get("biome", 0)) >= 2:
+		for res in craft:
+			if res == "coins":
+				continue
+			var amt := int(ceil(float(craft[res]) * factor))
+			if amt > 0:
+				cost[res] = amt
+	return cost
 
-# --- Transport (Elevator / Drillevator): start a run down at your best depth ---
-const ELEVATOR_CAP := 150   # Elevator start-depth cap (bottom of biome 3)
+# --- Transport (Elevator / Drillevator): begin a run at the START of a biome ---
+# you've discovered. The Elevator only reaches down to Biome 3; the Drillevator
+# reaches any biome you've been to.
+const ELEVATOR_MAX_BIOME := 3   # biome index 3 = Biome 4 ("Crystal Hollow")
 
 func owns_elevator() -> bool:
 	return upgrade_level("buy_elevator") > 0
@@ -395,23 +442,31 @@ func owns_drillevator() -> bool:
 func owns_transport() -> bool:
 	return owns_elevator() or owns_drillevator()
 
-## Depth a run would start at with the best owned transport (0 = none/surface).
-## Ignores the use_transport toggle -- that gate is applied by the caller.
-func transport_start_depth() -> int:
+## Deepest biome index the owned transport can drop you at (0 = surface only).
+func transport_max_biome() -> int:
+	var reached := GameData.biome_index_for_row(max_depth)
 	if owns_drillevator():
-		return max_depth
+		return reached
 	if owns_elevator():
-		return mini(max_depth, ELEVATOR_CAP)
+		return mini(reached, ELEVATOR_MAX_BIOME)
 	return 0
+
+## Start depth (metres) of the deepest biome the transport can reach.
+func transport_start_depth() -> int:
+	return int(GameData.BIOMES[transport_max_biome()]["depth_lo"])
 
 ## Upgrade the currently-equipped pickaxe one level. Returns true on success.
 func buy_pickaxe_upgrade() -> bool:
 	if is_pickaxe_upgrade_maxed(pickaxe_tier):
 		return false
 	var cost := pickaxe_upgrade_cost(pickaxe_tier)
-	if money < cost:
+	if cost.is_empty() or not can_afford(cost):
 		return false
-	money -= cost
+	for res in cost:
+		if res == "coins":
+			money -= int(cost[res])
+		else:
+			resources[res] = int(resources.get(res, 0)) - int(cost[res])
 	pickaxe_upgrade_levels[pickaxe_tier] = pickaxe_upgrade_level(pickaxe_tier) + 1
 	return true
 
@@ -469,6 +524,10 @@ func is_skill_maxed(id: String) -> bool:
 	return skill_level(id) >= int(GameData.SKILLS[id].get("max_level", 9999))
 
 func skill_unlocked(id: String) -> bool:
+	# Some nodes (the Heart) gate on player level instead of a prerequisite node.
+	var ul: int = int(GameData.SKILLS[id].get("unlock_level", 0))
+	if ul > 0 and get_level() < ul:
+		return false
 	var req: String = GameData.SKILLS[id].get("requires", "")
 	return req == "" or skill_level(req) > 0
 

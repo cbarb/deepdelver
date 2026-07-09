@@ -117,17 +117,33 @@ func _style_button(b: Button, bg: Color, txt: Color, border: Color, bw: int) -> 
 	b.add_theme_color_override("font_pressed_color", txt)
 	b.add_theme_color_override("font_disabled_color", txt.darkened(0.35))
 
-## A small resource icon (colored square) + amount chip.
+## An item's pack icon at `px` size, falling back to a colored swatch if the
+## item has no icon mapped.
+func _item_icon(id: String, px: int, col: Color) -> Control:
+	var tex := GameData.item_icon(id)
+	if tex != null:
+		var r := TextureRect.new()
+		r.texture = tex
+		r.custom_minimum_size = Vector2(px, px)
+		r.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		r.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		r.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		return r
+	var sq := Panel.new()
+	sq.custom_minimum_size = Vector2(px, px)
+	sq.add_theme_stylebox_override("panel", _sb(col, col.darkened(0.35), 1, 2, 0))
+	return sq
+
+## A small item icon + amount chip.
 func _chip(res: String, amount: int) -> Control:
 	var col: Color = C_AMBER if res == "coins" else GameData.resource_color(res)
 	var rname := "Coins" if res == "coins" else GameData.resource_name(res)
 	var box := HBoxContainer.new()
 	box.add_theme_constant_override("separation", 5)
-	var sq := Panel.new()
-	sq.custom_minimum_size = Vector2(12, 12)
-	sq.add_theme_stylebox_override("panel", _sb(col, col.darkened(0.35), 1, 2, 0))
-	box.add_child(sq)
-	box.add_child(_lbl("%d %s" % [amount, rname], 17, C_TEXT))
+	var icon := _item_icon(res, 20, col)
+	icon.size_flags_vertical = Control.SIZE_SHRINK_CENTER
+	box.add_child(icon)
+	box.add_child(_lbl("%s %s" % [GameData.fmt(amount), rname], 17, C_TEXT))
 	return box
 
 # ===========================================================================
@@ -204,9 +220,8 @@ func _build_header(outer: VBoxContainer) -> void:
 	var crow := HBoxContainer.new()
 	crow.add_theme_constant_override("separation", 6)
 	coinchip.add_child(crow)
-	var dot := Panel.new()
-	dot.custom_minimum_size = Vector2(14, 14)
-	dot.add_theme_stylebox_override("panel", _sb(C_AMBER, C_AMBER.darkened(0.3), 1, 7, 0))
+	var dot := _item_icon("coins", 22, C_AMBER)
+	dot.size_flags_vertical = Control.SIZE_SHRINK_CENTER
 	crow.add_child(dot)
 	_coins_lbl = _lbl("0", 20, C_AMBER)
 	crow.add_child(_coins_lbl)
@@ -334,11 +349,18 @@ func _build_right(cols: HBoxContainer) -> void:
 	col.add_child(lr)
 	var lrv := VBoxContainer.new()
 	lrv.add_theme_constant_override("separation", 6)
+	lrv.size_flags_vertical = Control.SIZE_EXPAND_FILL
 	lr.add_child(lrv)
 	lrv.add_child(_hlbl("LAST RUN", 13, C_TITLE))
+	# Scroll the body so a long resource list can't overflow the panel/other UI.
+	var lrscroll := ScrollContainer.new()
+	lrscroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	lrscroll.size_flags_vertical = Control.SIZE_EXPAND_FILL
+	lrv.add_child(lrscroll)
 	_lastrun_body = VBoxContainer.new()
 	_lastrun_body.add_theme_constant_override("separation", 4)
-	lrv.add_child(_lastrun_body)
+	_lastrun_body.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	lrscroll.add_child(_lastrun_body)
 
 func _build_footer(outer: VBoxContainer) -> void:
 	var bar := _panel(C_PANEL, C_PANEL_BORDER, 2, 12)
@@ -387,10 +409,10 @@ func refresh() -> void:
 func _fill_header() -> void:
 	var lp := GameState.level_progress()
 	_lv_lbl.text = "LV %d" % lp["level"]
-	_exp_range_lbl.text = "EXP  %d / %d" % [lp["into"], lp["need"]]
+	_exp_range_lbl.text = "EXP  %s / %s" % [GameData.fmt(lp["into"]), GameData.fmt(lp["need"])]
 	_exp_bar.max_value = maxf(1.0, float(lp["need"]))
 	_exp_bar.value = float(lp["into"])
-	_coins_lbl.text = str(GameState.money)
+	_coins_lbl.text = GameData.fmt(GameState.money)
 
 func _stat_cell(cell_name: String, value: String) -> PanelContainer:
 	var p := _panel(C_CARD, C_CARD_BORDER, 1, 8)
@@ -429,7 +451,7 @@ func _fill_character() -> void:
 	grid.add_theme_constant_override("h_separation", 8)
 	grid.add_theme_constant_override("v_separation", 8)
 	_char_body.add_child(grid)
-	grid.add_child(_stat_cell("Click Dmg", "%.1f" % st["click_damage"]))
+	grid.add_child(_stat_cell("Click Dmg", GameData.fmt(st["click_damage"])))
 	grid.add_child(_stat_cell("Cooldown", "%.2fs" % st["click_cooldown"]))
 	grid.add_child(_stat_cell("Yield", "x%.2f" % st["resource_mult"]))
 	grid.add_child(_stat_cell("EXP", "x%.2f" % st["exp_mult"]))
@@ -438,33 +460,50 @@ func _fill_character() -> void:
 	grid.add_child(_stat_cell("Drills", "%d" % int(st["drill_count"])))
 	grid.add_child(_stat_cell("Crusher", "Lv %d" % GameState.crush_rate()))
 
-func _stock_tile(col: Color, count: int, name: String) -> VBoxContainer:
+func _stock_tile(id: String, count: int) -> VBoxContainer:
+	var is_coin := id == "coins"
+	var col: Color = C_AMBER if is_coin else GameData.resource_color(id)
+	var nm := "Coins" if is_coin else GameData.resource_name(id)
+	var tex := GameData.item_icon(id)
 	var v := VBoxContainer.new()
 	v.add_theme_constant_override("separation", 2)
 	var sq := Panel.new()
 	sq.custom_minimum_size = Vector2(70, 60)
 	sq.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	sq.add_theme_stylebox_override("panel", _sb(col, col.darkened(0.35), 2, 4, 2))
-	var cl := _lbl(str(count), 20, Color.WHITE)
-	cl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
-	cl.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	# With an icon, use a dim backdrop so the icon reads; otherwise the old bright swatch.
+	if tex != null:
+		sq.add_theme_stylebox_override("panel", _sb(col.darkened(0.6), col.darkened(0.25), 2, 4, 2))
+		var ic := TextureRect.new()
+		ic.texture = tex
+		ic.texture_filter = CanvasItem.TEXTURE_FILTER_NEAREST
+		ic.expand_mode = TextureRect.EXPAND_IGNORE_SIZE
+		ic.stretch_mode = TextureRect.STRETCH_KEEP_ASPECT_CENTERED
+		ic.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
+		ic.offset_left = 6; ic.offset_top = 3; ic.offset_right = -6; ic.offset_bottom = -3
+		sq.add_child(ic)
+	else:
+		sq.add_theme_stylebox_override("panel", _sb(col, col.darkened(0.35), 2, 4, 2))
+	var cl := _lbl(GameData.fmt(count), 18, Color.WHITE)
+	cl.horizontal_alignment = HORIZONTAL_ALIGNMENT_RIGHT
+	cl.vertical_alignment = VERTICAL_ALIGNMENT_BOTTOM
 	cl.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
-	cl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.85))
-	cl.add_theme_constant_override("outline_size", 5)
+	cl.offset_right = -4
+	cl.add_theme_color_override("font_outline_color", Color(0, 0, 0, 0.9))
+	cl.add_theme_constant_override("outline_size", 6)
 	sq.add_child(cl)
 	v.add_child(sq)
-	var nl := _lbl(name, 17, C_MUTED)
+	var nl := _lbl(nm, 17, C_MUTED)
 	nl.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
 	v.add_child(nl)
 	return v
 
 func _fill_stockpile() -> void:
 	_clear(_stock_grid)
-	_stock_grid.add_child(_stock_tile(C_AMBER, GameState.money, "Coins"))
+	_stock_grid.add_child(_stock_tile("coins", GameState.money))
 	for id in GameData.RESOURCES:
 		var amt := int(GameState.resources.get(id, 0))
 		if amt > 0:
-			_stock_grid.add_child(_stock_tile(GameData.resource_color(id), amt, GameData.resource_name(id)))
+			_stock_grid.add_child(_stock_tile(id, amt))
 
 # ===========================================================================
 # Crafting Bench (tabs + cards)
@@ -605,11 +644,11 @@ func _add_pickaxe_cards() -> void:
 		_make_card(C_AMBER, "Upgrade %s" % cur["name"], "MAX Lv%d" % lvl, C_GREEN,
 			"This pickaxe is fully upgraded.", {}, "MAXED", "max", Callable())
 	else:
-		var ucost: int = GameState.pickaxe_upgrade_cost(tier)
+		var ucost: Dictionary = GameState.pickaxe_upgrade_cost(tier)
 		var next_mult: float = float(GameData.PICKAXE_UPGRADE_MULT[lvl])
-		var afford := GameState.money >= ucost
+		var afford := GameState.can_afford(ucost)
 		_make_card(C_AMBER, "Upgrade %s" % cur["name"], "Lv %d" % lvl, C_AMBER,
-			"Raise damage to x%.2f (Lv %d)." % [next_mult, lvl + 1], {"coins": ucost},
+			"Raise damage to x%.2f (Lv %d)." % [next_mult, lvl + 1], ucost,
 			"CRAFT" if afford else "NEED MORE", "craft" if afford else "need", _on_upgrade_pickaxe)
 
 func _add_golem_cards() -> void:
@@ -642,8 +681,8 @@ func _fill_skills() -> void:
 		h.add_child(_lbl(value, 17, C_TEXT))
 		_skill_body.add_child(h)
 	row.call("Level", str(lp["level"]))
-	row.call("Points free", str(GameState.skill_points_available()))
-	row.call("Spent", "%d / %d" % [GameState.skill_points_spent(), GameState.skill_points_total()])
+	row.call("Points free", GameData.fmt(GameState.skill_points_available()))
+	row.call("Spent", "%s / %s" % [GameData.fmt(GameState.skill_points_spent()), GameData.fmt(GameState.skill_points_total())])
 
 	var chips := HBoxContainer.new()
 	chips.add_theme_constant_override("separation", 6)
@@ -684,8 +723,8 @@ func _fill_skills() -> void:
 
 func _fill_crusher() -> void:
 	_clear(_crusher_body)
-	_crusher_body.add_child(_wrap_lbl("Smash leftover Rubble into shiny Coins at camp.", 18, C_MUTED))
-	var rubble := int(GameState.resources.get("rubble", 0))
+	_crusher_body.add_child(_wrap_lbl("Smash leftover Rubble into Coins. Deeper Rubble is worth more.", 18, C_MUTED))
+	var rubble := GameState.total_rubble()
 	var rate := GameState.crush_rate()
 	var btn := Button.new()
 	btn.add_theme_font_size_override("font_size", 11)
@@ -695,7 +734,7 @@ func _fill_crusher() -> void:
 		_style_button(btn, C_CARD, C_MUTED, C_CARD_BORDER, 1)
 		btn.disabled = true
 	else:
-		btn.text = "CRUSH %d → +%d COINS" % [rubble, rubble * rate]
+		btn.text = "CRUSH %s → +%s COINS" % [GameData.fmt(rubble), GameData.fmt(GameState.rubble_coins_preview())]
 		_style_button(btn, C_AMBER, C_DARK_TXT, C_AMBER.darkened(0.25), 2)
 		btn.disabled = rubble <= 0
 		if rubble > 0:
@@ -712,13 +751,13 @@ func _fill_lastrun() -> void:
 		return
 	if s.get("new_record", false):
 		_lastrun_body.add_child(_lbl("NEW DEPTH RECORD!", 18, C_AMBER))
-	_lastrun_body.add_child(_lbl("Depth reached: %d m" % s.get("depth", 0), 17, C_TEXT))
-	_lastrun_body.add_child(_lbl("Tiles mined: %d" % s.get("tiles_mined", 0), 17, C_TEXT))
-	_lastrun_body.add_child(_lbl("Resource tiles: %d" % s.get("rare_found", 0), 17, C_TEXT))
-	_lastrun_body.add_child(_lbl("EXP gained: %d" % s.get("exp", 0), 17, C_GREEN))
+	_lastrun_body.add_child(_lbl("Depth reached: %s m" % GameData.fmt(s.get("depth", 0)), 17, C_TEXT))
+	_lastrun_body.add_child(_lbl("Tiles mined: %s" % GameData.fmt(s.get("tiles_mined", 0)), 17, C_TEXT))
+	_lastrun_body.add_child(_lbl("Resource tiles: %s" % GameData.fmt(s.get("rare_found", 0)), 17, C_TEXT))
+	_lastrun_body.add_child(_lbl("EXP gained: %s" % GameData.fmt(s.get("exp", 0)), 17, C_GREEN))
 	var res: Dictionary = s.get("resources", {})
 	for id in res:
-		_lastrun_body.add_child(_lbl("  %s x%d" % [GameData.resource_name(id), res[id]], 17, GameData.resource_color(id)))
+		_lastrun_body.add_child(_lbl("  %s x%s" % [GameData.resource_name(id), GameData.fmt(res[id])], 17, GameData.resource_color(id)))
 
 # ===========================================================================
 # Actions

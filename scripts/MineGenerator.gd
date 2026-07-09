@@ -25,7 +25,7 @@ func generate_chunk(chunk_index: int, grid: Dictionary) -> void:
 		var bi := GameData.biome_index_for_row(y)
 		var biome: Dictionary = GameData.BIOMES[bi]
 		for x in range(width):
-			grid[Vector2i(x, y)] = _make_filler(biome, bi)
+			grid[Vector2i(x, y)] = _make_filler(biome, bi, y)
 
 	# Pass 2: seed clustered common/rare resources + barriers per target %.
 	for y in range(row0, row1 + 1):
@@ -73,9 +73,9 @@ func _grow_cluster(start: Vector2i, biome: Dictionary, bi: int, grid: Dictionary
 		guard += 1
 		if cur.x >= 0 and cur.x < width and cur.y >= row0 and cur.y <= row1:
 			if category == "barrier":
-				grid[cur] = _make_barrier(biome, bi)
+				grid[cur] = _make_barrier(biome, bi, cur.y)
 			else:
-				grid[cur] = _make_resource(tile_def, biome, bi, category)
+				grid[cur] = _make_resource(tile_def, biome, bi, category, cur.y)
 			placed += 1
 		# random-walk step, biased slightly downward for a vein feel
 		var dir := [Vector2i(1, 0), Vector2i(-1, 0), Vector2i(0, 1), Vector2i(0, 1), Vector2i(0, -1)]
@@ -88,34 +88,38 @@ func _resources_of_rarity(biome: Dictionary, rarity: String) -> Array:
 			out.append(r)
 	return out
 
-func _make_filler(biome: Dictionary, bi: int) -> Dictionary:
+func _make_filler(biome: Dictionary, bi: int, row: int) -> Dictionary:
 	var f := _weighted_pick(biome["fillers"])
 	return {
 		"id": f["id"], "name": f["name"], "color": f["color"],
 		"type": "filler", "glow": false,
-		"max_health": GameData.tile_hp(bi, "filler"),
+		"max_health": _hp(bi, "filler", row),
 		"exp": biome["exp_filler"], "drops": {},
 	}
 
-func _make_resource(res_def: Dictionary, biome: Dictionary, bi: int, category: String) -> Dictionary:
+func _make_resource(res_def: Dictionary, biome: Dictionary, bi: int, category: String, row: int) -> Dictionary:
 	var id: String = res_def["id"]
 	var amt: Array = res_def["amount"]
 	return {
 		"id": id, "name": GameData.resource_name(id), "color": GameData.resource_color(id),
 		"type": "resource", "rarity": category, "glow": bool(res_def.get("glow", false)),
-		"max_health": GameData.tile_hp(bi, category),   # "common" or "rare"
+		"max_health": _hp(bi, category, row),   # "common" or "rare"
 		"exp": biome["exp_resource"],
 		"drops": {id: [int(amt[0]), int(amt[1])]},
 	}
 
-func _make_barrier(biome: Dictionary, bi: int) -> Dictionary:
+func _make_barrier(biome: Dictionary, bi: int, row: int) -> Dictionary:
 	var b: Dictionary = biome["barrier"]
 	return {
 		"id": b["id"], "name": b["name"], "color": b["color"],
 		"type": "barrier", "glow": false,
-		"max_health": GameData.tile_hp(bi, "barrier"),
+		"max_health": _hp(bi, "barrier", row),
 		"exp": biome["exp_filler"], "drops": {},   # tough, no resource drops
 	}
+
+## Base biome HP for a category, scaled up by the deep-descent multiplier.
+func _hp(bi: int, category: String, row: int) -> int:
+	return int(round(GameData.tile_hp(bi, category) * GameData.deep_hp_mult(row)))
 
 func _weighted_pick(list: Array) -> Dictionary:
 	var total := 0.0

@@ -8,7 +8,8 @@ extends Node
 # RESOURCES  ( id -> display data + coin value )
 # ---------------------------------------------------------------------------
 var RESOURCES := {
-	"rubble":         {"name": "Rubble",          "color": Color8(120, 118, 112), "value": 1},
+	# Rubble tiers (rubble_1..rubble_10, one per biome) are injected in _ready();
+	# deeper biomes drop higher-tier rubble that crushes into more coins.
 	"rock":           {"name": "Rock",            "color": Color8(178, 174, 166), "value": 1},
 	"wood":           {"name": "Wood Roots",      "color": Color8(146, 104, 62),  "value": 2},
 	"copper":         {"name": "Copper",          "color": Color8(206, 120, 66),  "value": 6},
@@ -106,7 +107,18 @@ func _r(id, w, amt_lo, amt_hi, glow := false, rarity := "common") -> Dictionary:
 func _bar(id, name, col) -> Dictionary:
 	return {"id": id, "name": name, "color": col}
 
+# Coins that ONE unit of each biome's rubble is worth at Crusher Lv 1 (deeper =
+# more). Crusher level multiplies this. Index 0 = biome 1 ... 9 = biome 10.
+const RUBBLE_VALUE := [1, 2, 4, 7, 12, 20, 34, 57, 96, 160]
+
 func _ready() -> void:
+	# Inject the per-biome rubble tiers into RESOURCES: "Rubble I".."Rubble X",
+	# tinted grey -> warm as they get deeper, with rising coin value.
+	for i in range(RUBBLE_VALUE.size()):
+		var tint: Color = Color8(120, 118, 112).lerp(Color8(206, 172, 118), float(i) / float(RUBBLE_VALUE.size() - 1))
+		RESOURCES["rubble_%d" % (i + 1)] = {
+			"name": "Rubble %s" % _roman(i + 1), "color": tint, "value": RUBBLE_VALUE[i]}
+
 	BIOMES = [
 		_biome(0, "Shallow Dirtworks", 0, 25, [
 			_f("dirt", "Dirt", Color8(138, 98, 62), 50),
@@ -202,6 +214,10 @@ func biome_index_for_row(row: int) -> int:
 func biome_for_row(row: int) -> Dictionary:
 	return BIOMES[biome_index_for_row(row)]
 
+## Rubble resource id for a given biome index (0-based) -> "rubble_1".."rubble_10".
+func rubble_id_for_biome(biome_index: int) -> String:
+	return "rubble_%d" % (clampi(biome_index, 0, RUBBLE_VALUE.size() - 1) + 1)
+
 func resource_name(id: String) -> String:
 	return RESOURCES.get(id, {}).get("name", id)
 
@@ -210,6 +226,43 @@ func resource_color(id: String) -> Color:
 
 func resource_value(id: String) -> int:
 	return int(RESOURCES.get(id, {}).get("value", 1))
+
+# --- Item icons (assets/items/) mapped to resources, coins, and rubble. ---
+const ICON_DIR := "res://assets/items/"
+const COIN_ICON := "coin-gold-stack"
+const RUBBLE_ICON := "rock-stone"
+const RESOURCE_ICONS := {
+	"rock": "rock-gray", "wood": "root-brown", "copper": "ore-copper-chunk",
+	"coal": "rock-dark", "iron": "bar-iron", "resin": "log-orange-bundle",
+	"cave_moss": "leaf-pile-green", "blue_crystal": "crystal-blue-cluster",
+	"quartz": "crystal-silver-shards", "silver": "ore-silver-rock", "ember": "ore-ember",
+	"sulfur": "gem-topaz-shard", "obsidian": "rock-obsidian", "relic": "gem-emerald-block",
+	"gold": "bar-gold", "rune": "ring-rune-blue", "mycelium": "food-mushroom-cluster",
+	"glowcap": "food-mushroom-red", "deep_iron": "bar-steel", "titanium": "bar-platinum",
+	"pressure_gem": "gem-diamond-cut", "black_coal": "ore-dark-orb", "astral": "gem-crystal-comet",
+	"prismatic": "gem-crystal-crown", "moon": "orb-crystal", "heartstone": "heart-red",
+	"core_fragment": "orb-red-swirl", "ancient_energy": "orb-flame-gold",
+}
+var _icon_cache := {}
+
+## Texture for an item id (resource id, "coins", or any "rubble_N"). null if none.
+func item_icon(id: String) -> Texture2D:
+	if _icon_cache.has(id):
+		return _icon_cache[id]
+	var file := ""
+	if id == "coins":
+		file = COIN_ICON
+	elif id.begins_with("rubble"):
+		file = RUBBLE_ICON
+	elif RESOURCE_ICONS.has(id):
+		file = RESOURCE_ICONS[id]
+	var tex: Texture2D = null
+	if file != "":
+		var p: String = ICON_DIR + file + ".png"
+		if ResourceLoader.exists(p):
+			tex = load(p)
+	_icon_cache[id] = tex
+	return tex
 
 # ---------------------------------------------------------------------------
 # UPGRADES  (bought with resources on the surface)
@@ -413,6 +466,28 @@ const SKILL_SIZE_COST := {"small": 1, "medium": 2, "large": 3, "capstone": 5}
 const SKILL_SIZE_MAXLVL := {"small": 5, "medium": 3, "large": 2, "capstone": 1}
 const SKILL_SIZE_SCALE := {"small": 1.0, "medium": 2.0, "large": 3.5, "capstone": 6.0}
 
+# --- Heart of the Delve (endless central node) ---
+const HEART_UNLOCK_LEVEL := 100        # player level required to spend points here
+const HEART_COST := 1                  # skill points per level
+const HEART_MAX_LEVEL := 1_000_000_000 # effectively infinite
+const HEART_PER_LEVEL := 0.02          # +2% to ALL damage per point (linear)
+
+# --- Deep-descent HP scaling (offsets the endless Heart bonus) ---
+# Past DEEP_HP_THRESHOLD metres (well inside the endless final biome), block HP
+# rises DEEP_HP_PER_STEP for every DEEP_HP_STEP metres deeper. This mirrors the
+# Heart's +2%/point: a delver gains roughly one Heart point per ~50 m of new
+# depth, so tougher deep blocks and stronger damage track each other and the
+# challenge stays flat instead of the Heart trivialising the abyss.
+const DEEP_HP_THRESHOLD := 2000
+const DEEP_HP_PER_STEP := 0.02
+const DEEP_HP_STEP := 50.0
+
+## HP multiplier for a block at the given row (metres). 1.0 until the threshold.
+func deep_hp_mult(row: int) -> float:
+	if row <= DEEP_HP_THRESHOLD:
+		return 1.0
+	return 1.0 + DEEP_HP_PER_STEP * (float(row - DEEP_HP_THRESHOLD) / DEEP_HP_STEP)
+
 func _build_skill_tree() -> void:
 	SKILLS.clear()
 	for si in range(SKILL_PATHS.size()):
@@ -452,6 +527,18 @@ func _build_skill_tree() -> void:
 				this_ring.append({"id": id, "angle": angle})
 			prev_ring = this_ring
 	_normalize_skill_caps()
+
+	# Heart of the Delve: the central hub node. Unlocks at level 100, then takes
+	# skill points ENDLESSLY, each granting +2% to ALL mining damage (linear, no
+	# cap). Drawn as the hub in SkillTreePanel (excluded from the radial layout).
+	SKILLS["heart"] = {
+		"name": "Heart of the Delve", "path": "", "section": "Manual",
+		"ring": 0, "angle_deg": 0, "size": "capstone",
+		"cost": HEART_COST, "max_level": HEART_MAX_LEVEL, "requires": "",
+		"unlock_level": HEART_UNLOCK_LEVEL,
+		"stat": "all_damage_mult", "mode": "mult", "per_level": HEART_PER_LEVEL,
+		"desc": "The tree's core. +2% to ALL damage per point, forever — but the deep dark fights back.",
+	}
 
 ## Rescale each capped stat's per_level so that maxing every node of that stat
 ## across the whole tree lands exactly on its SKILL_CAPS total. Node effects stack
@@ -514,6 +601,34 @@ func _roman(n: int) -> String:
 	var r := ["I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X"]
 	return r[clampi(n - 1, 0, r.size() - 1)]
 
+## Human-friendly number: shown in full up to 9999, then abbreviated (10K, 1.5M,
+## 2B, ...). Whole values below the threshold drop their decimals. Use everywhere
+## a raw count/coin/damage number is displayed.
+func fmt(value) -> String:
+	var f := float(value)
+	var a := absf(f)
+	if a < 10000.0:
+		if f == floor(f):
+			return str(int(f))
+		return "%.1f" % f
+	var sign := "-" if f < 0.0 else ""
+	var units := ["K", "M", "B", "T", "Qa", "Qi", "Sx", "Sp"]
+	var idx := 0
+	# 999.5+ rounds up to the next unit (avoids "1000K" instead of "1M").
+	while a >= 999.5 and idx < units.size():
+		a /= 1000.0
+		idx += 1
+	var s: String
+	if a >= 100.0:
+		s = "%.0f" % a
+	elif a >= 10.0:
+		s = "%.1f" % a
+	else:
+		s = "%.2f" % a
+	if s.contains("."):
+		s = s.rstrip("0").rstrip(".")
+	return sign + s + units[idx - 1]
+
 ## Human-readable name for a stat key (used in skill descriptions/tooltips).
 func stat_label(stat: String) -> String:
 	return {
@@ -524,7 +639,7 @@ func stat_label(stat: String) -> String:
 		"ai_damage": "golem damage", "ai_damage_mult": "golem damage", "ai_interval": "golem interval",
 		"ai_resource_bonus": "golem resource yield",
 		"machine_damage": "machine damage", "machine_damage_mult": "machine damage", "machine_speed": "machine interval",
-		"resource_mult": "resource yield",
+		"resource_mult": "resource yield", "all_damage_mult": "all damage",
 	}.get(stat, stat)
 
 func _effect_desc(stat: String, mode: String, per: float) -> String:
@@ -590,41 +705,41 @@ var PICKAXES := [
 		"desc": "Crude starter tool.", "effect": {}},
 	{"tier": 1, "name": "Rootbound Pickaxe", "biome": 0, "base_damage": 4,
 		"cost": {"rock": 25, "wood": 10, "coins": 50},
-		"desc": "Hardened roots & stone. Dependable early damage.", "effect": {}},
+		"desc": "Roots burrow down: hits a widening root pattern below (50% then 25%).", "effect": {"pattern": "root"}},
 	{"tier": 2, "name": "Bronze Pickaxe", "biome": 1, "base_damage": 8,
 		"cost": {"copper": 40, "coal": 20, "coins": 250},
-		"desc": "Faster swings, pushes through stone.", "effect": {"cooldown_mult": 0.92}},
+		"desc": "Faster swings. Every 5th hit is a guaranteed crit (crits overflow).", "effect": {"pattern": "bronze", "cooldown_mult": 0.92}},
 	{"tier": 3, "name": "Iron Pickaxe", "biome": 2, "base_damage": 20,
-		"cost": {"iron": 60, "resin": 25, "coins": 900},
-		"desc": "Sturdy, reliable power.", "effect": {}},
+		"cost": {"iron": 150, "resin": 250, "coins": 2500},
+		"desc": "Splinters into up to 4 exposed/chipped neighbours (25%, 50% if the tile breaks).", "effect": {"pattern": "iron_splinter"}},
 	{"tier": 4, "name": "Crystal Pickaxe", "biome": 3, "base_damage": 30,
-		"cost": {"blue_crystal": 30, "quartz": 40, "silver": 20, "coins": 2500},
-		"desc": "Chance to shatter: splashes adjacent tiles. +resource yield.",
-		"effect": {"shatter_chance": 0.25, "shatter_damage": 20, "rare_resource_bonus": 0.25}},
+		"cost": {"blue_crystal": 550, "quartz": 700, "silver": 300, "coins": 11000},
+		"desc": "On break, 3 shards leap to nearby ore/exposed tiles (40%), chaining on crystals. +rare yield.",
+		"effect": {"pattern": "crystal_shatter", "rare_resource_bonus": 0.25}},
 	{"tier": 5, "name": "Ember Pickaxe", "biome": 4, "base_damage": 55,
-		"cost": {"ember": 40, "sulfur": 40, "obsidian": 20, "coins": 6500},
-		"desc": "Scorching hits burst nearby tiles.",
-		"effect": {"shatter_chance": 0.22, "shatter_damage": 16}},
+		"cost": {"ember": 900, "sulfur": 900, "obsidian": 450, "coins": 32000},
+		"desc": "Every 3rd hit explodes in a 3-tile radius (5 on crit), 100% center, -10% per ring.",
+		"effect": {"pattern": "ember"}},
 	{"tier": 6, "name": "Relic Pickaxe", "biome": 5, "base_damage": 95,
-		"cost": {"relic": 20, "gold": 50, "rune": 20, "coins": 15000},
-		"desc": "Chance to duplicate drops & refund cooldown.",
-		"effect": {"dup_chance": 0.2, "refund_chance": 0.25, "refund_amount": 0.5}},
+		"cost": {"relic": 500, "gold": 1400, "rune": 550, "coins": 85000},
+		"desc": "Shards orbit your pickaxe, hitting any tile for 50% damage. +1 shard per tile broken (max 12).",
+		"effect": {"pattern": "relic_orbit"}},
 	{"tier": 7, "name": "Mycelium Pickaxe", "biome": 6, "base_damage": 160,
-		"cost": {"deep_iron": 40, "mycelium": 40, "glowcap": 20, "coins": 34000},
-		"desc": "Spore bursts splash tiles. +EXP from filler.",
-		"effect": {"shatter_chance": 0.3, "shatter_damage": 40, "filler_exp_bonus": 0.5}},
+		"cost": {"deep_iron": 800, "mycelium": 1600, "glowcap": 1100, "coins": 220000},
+		"desc": "Spores spiral out 5 layers (8 on crit), each layer -5%. +EXP from filler.",
+		"effect": {"pattern": "spore", "filler_exp_bonus": 0.5}},
 	{"tier": 8, "name": "Titanium Pickaxe", "biome": 7, "base_damage": 270,
-		"cost": {"titanium": 30, "pressure_gem": 15, "black_coal": 40, "coins": 75000},
-		"desc": "Heavy industrial damage; scales with depth.",
-		"effect": {"depth_bonus": 1.0}},
+		"cost": {"titanium": 1800, "pressure_gem": 700, "black_coal": 2400, "coins": 550000},
+		"desc": "Drills 7 tiles down; even depths branch sideways. Scales with depth.",
+		"effect": {"pattern": "titanium", "depth_bonus": 1.0}},
 	{"tier": 9, "name": "Astral Pickaxe", "biome": 8, "base_damage": 460,
-		"cost": {"astral": 20, "moon": 25, "prismatic": 15, "coins": 160000},
-		"desc": "Chance to instantly break a tile; scales with depth.",
-		"effect": {"instant_chance": 0.1, "depth_bonus": 2.0}},
+		"cost": {"astral": 2600, "moon": 3200, "prismatic": 1300, "coins": 1400000},
+		"desc": "Breaks snake through nearby tiles toward ore. Mines sealed blocks. Chance to insta-break.",
+		"effect": {"pattern": "astral_snake", "mine_unexposed": true, "instant_chance": 0.1, "depth_bonus": 2.0}},
 	{"tier": 10, "name": "Core Pickaxe", "biome": 9, "base_damage": 780,
-		"cost": {"heartstone": 15, "core_fragment": 12, "ancient_energy": 8, "coins": 350000},
-		"desc": "Core pulse snakes through a chain of nearby tiles. +rare yield & instant chance.",
-		"effect": {"chain_mult": 6.0, "rare_resource_bonus": 0.5, "instant_chance": 0.08}},
+		"cost": {"heartstone": 3800, "core_fragment": 2800, "ancient_energy": 1900, "coins": 3500000},
+		"desc": "Overkill damage overflows to surrounding tiles. Mines sealed blocks. +rare yield & insta-break.",
+		"effect": {"pattern": "core", "rare_resource_bonus": 0.5, "instant_chance": 0.08, "mine_unexposed": true}},
 ]
 
 # ---------------------------------------------------------------------------
